@@ -85,7 +85,7 @@ dockerConfigSecret: ""
 
 # ── Image ─────────────────────────────────────────────────────────────────────
 image:
-  repository: registry.digitalocean.com/stack-radar/stack-radar-scanner
+  repository: ghcr.io/lockdep/stackradar-scanner
   pullPolicy: Always
 
 # ── Image pull secrets ────────────────────────────────────────────────────────
