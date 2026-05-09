@@ -1,0 +1,26 @@
+{
+  "name": "@stackradar/cluster-scanner",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "LOG_PRETTY=true tsx src/index.ts",
+    "dev:watch": "LOG_PRETTY=true tsx src/watch.ts",
+    "build": "tsc",
+    "start": "node dist/src/index.js",
+    "start:watch": "node dist/src/watch.js",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@kubernetes/client-node": "^1.0.0",
+    "pino": "^10.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "pino-pretty": "^13.1.3",
+    "tsx": "^4.0.0",
+    "typescript": "^5.0.0",
+    "vitest": "^4.1.2"
+  }
+}

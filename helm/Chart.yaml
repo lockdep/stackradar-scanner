@@ -1,0 +1,6 @@
+apiVersion: v2
+name: stackradar-scanner
+description: Periodically scans all running images in a Kubernetes cluster and uploads SBOMs to StackRadar.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

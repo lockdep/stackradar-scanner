@@ -1,0 +1,106 @@
+# ── StackRadar connection ─────────────────────────────────────────────────────
+#
+# The scanner reads sensitive credentials from a Kubernetes Secret named after
+# the Helm release (e.g. `stackradar-scanner`) with keys `cluster-id` and
+# `api-key`. The API URL is a chart value (see `stackradar.apiUrl` below) and
+# defaults to the hosted StackRadar API, so it does not need to live in the
+# Secret.
+#
+# Recommended flow (credentials live only in Kubernetes):
+#   1. helm install stackradar-scanner oci://…/stackradar-scanner \
+#        --namespace stackradar --create-namespace
+#   2. kubectl create secret generic stackradar-scanner \
+#        --namespace stackradar \
+#        --from-literal=cluster-id=<cluster-id> \
+#        --from-file=api-key=./path-to-key-file
+#
+# Until the Secret exists, the scanner Pod will stay Pending/CrashLoopBackOff —
+# that is expected. No values need to be set below for the recommended flow.
+stackradar:
+  # Where the scanner sends SBOMs. Override only when running against a
+  # self-hosted StackRadar instance.
+  apiUrl: "https://api.stackradar.io"
+
+  # Optional: pass credentials inline at install time (e.g. from a CI secret
+  # store). If apiKey is set, the chart will create the Secret above for you.
+  # Avoid in day-to-day use — values land on disk and in CI logs.
+  clusterId: ""
+  apiKey: ""
+
+  # Optional: reference a Secret you manage yourself (e.g. sealed-secrets,
+  # external-secrets, SOPS). If set, the chart will not create a Secret and the
+  # Deployment reads from this one instead.
+  existingSecret: ""          # Secret name
+  # existingSecretKeyApiKey: "api-key"
+  # existingSecretKeyClusterId: "cluster-id"
+
+# ── Scanner behaviour ─────────────────────────────────────────────────────────
+scanner:
+  # Namespaces to skip (comma-separated). System namespaces are excluded by default.
+  excludeNamespaces: "kube-system,kube-public,kube-node-lease"
+
+  # Namespaces to scan (comma-separated). When set, ONLY these namespaces are scanned.
+  # includeNamespaces: ""
+
+  # Timeout per image scan in milliseconds (default: 5 min)
+  syftTimeoutMs: "300000"
+
+  # Skip images whose digest is already indexed in StackRadar (default: true).
+  # Eliminates redundant syft runs when the image binary has not changed.
+  skipExistingDigests: "true"
+
+  # Resolve imagePullSecrets from workload pod specs for private registry auth
+  # (default: true). Requires secrets get permission in the ClusterRole.
+  resolveImagePullSecrets: "true"
+
+# ── Watcher (event-driven Deployment with built-in periodic sweeps) ───────────
+# On startup the informer does a full LIST of all pods (startup sweep), then
+# watches for changes in real time. A periodic sweep re-lists all pods on a
+# fixed interval to catch anything missed during informer gaps or restarts.
+watcher:
+  enabled: true
+  # How often to run a full pod sweep in milliseconds (default: 6 hours).
+  # Set to 0 to disable periodic sweeps and rely on the informer only.
+  sweepIntervalMs: "21600000"
+  # Concurrency for both event-driven and sweep scans. Each syft invocation is a
+  # Go subprocess that can use 300–600 MiB for large images (e.g. Next.js apps
+  # with big node_modules trees), and its RSS counts against this pod's cgroup
+  # limit alongside Node. Keeping this at 1 avoids OOM kills under the
+  # memory budget below.
+  concurrentScans: "1"
+  resources:
+    requests:
+      cpu: 50m
+      memory: 512Mi
+    limits:
+      memory: 1Gi
+
+# ── Private registry credentials ─────────────────────────────────────────────
+# Mount a docker config.json to allow syft to pull from private registries.
+# Create the secret with:
+#   kubectl create secret generic registry-credentials \
+#     --from-file=.dockerconfigjson=$HOME/.docker/config.json \
+#     --type=kubernetes.io/dockerconfigjson
+dockerConfigSecret: ""
+
+# ── Image ─────────────────────────────────────────────────────────────────────
+image:
+  repository: registry.digitalocean.com/stack-radar/stack-radar-scanner
+  pullPolicy: Always
+
+# ── Image pull secrets ────────────────────────────────────────────────────────
+imagePullSecrets: []
+# - name: registry-stack-radar
+
+# ── Resources ─────────────────────────────────────────────────────────────────
+resources:
+  requests:
+    cpu: 100m
+    memory: 1536Mi
+  limits:
+    memory: 1536Mi
+
+# ── RBAC ──────────────────────────────────────────────────────────────────────
+serviceAccount:
+  create: true
+  name: ""

@@ -1,0 +1,102 @@
+{{- if .Values.watcher.enabled }}
+{{- $secretName := .Values.stackradar.existingSecret | default (include "stackradar-scanner.fullname" .) }}
+{{- $secretKeyApiKey := .Values.stackradar.existingSecretKeyApiKey | default "api-key" }}
+{{- $secretKeyClusterId := .Values.stackradar.existingSecretKeyClusterId | default "cluster-id" }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "stackradar-scanner.fullname" . }}-watcher
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "stackradar-scanner.labels" . | nindent 4 }}
+    app.kubernetes.io/component: watcher
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "stackradar-scanner.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: watcher
+  template:
+    metadata:
+      labels:
+        {{- include "stackradar-scanner.labels" . | nindent 8 }}
+        app.kubernetes.io/component: watcher
+    spec:
+      serviceAccountName: {{ include "stackradar-scanner.serviceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+
+      {{- if .Values.dockerConfigSecret }}
+      volumes:
+        - name: docker-config
+          secret:
+            secretName: {{ .Values.dockerConfigSecret }}
+            items:
+              - key: .dockerconfigjson
+                path: config.json
+      {{- end }}
+
+      containers:
+        - name: watcher
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["node", "dist/src/watch.js"]
+
+          env:
+            - name: NODE_OPTIONS
+              value: "--max-old-space-size=256"
+            # Reported to the control plane via the `X-Scanner-Version` header
+            # so the UI can flag clusters running an outdated Helm chart.
+            - name: STACKRADAR_SCANNER_VERSION
+              value: {{ .Chart.Version | quote }}
+            - name: STACKRADAR_API_URL
+              value: {{ required "stackradar.apiUrl is required" .Values.stackradar.apiUrl | quote }}
+            - name: STACKRADAR_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretName }}
+                  key: {{ $secretKeyApiKey }}
+            - name: STACKRADAR_CLUSTER_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretName }}
+                  key: {{ $secretKeyClusterId }}
+            - name: EXCLUDE_NAMESPACES
+              value: {{ .Values.scanner.excludeNamespaces | quote }}
+            {{- if .Values.scanner.includeNamespaces }}
+            - name: INCLUDE_NAMESPACES
+              value: {{ .Values.scanner.includeNamespaces | quote }}
+            {{- end }}
+            - name: SYFT_TIMEOUT_MS
+              value: {{ .Values.scanner.syftTimeoutMs | quote }}
+            - name: CONCURRENT_SCANS
+              value: {{ .Values.watcher.concurrentScans | quote }}
+            - name: SWEEP_INTERVAL_MS
+              value: {{ .Values.watcher.sweepIntervalMs | quote }}
+            - name: SKIP_EXISTING_DIGESTS
+              value: {{ .Values.scanner.skipExistingDigests | quote }}
+            - name: RESOLVE_IMAGE_PULL_SECRETS
+              value: {{ .Values.scanner.resolveImagePullSecrets | quote }}
+            {{- if .Values.dockerConfigSecret }}
+            - name: DOCKER_CONFIG
+              value: /home/node/.docker
+            {{- end }}
+
+          {{- if .Values.dockerConfigSecret }}
+          volumeMounts:
+            - name: docker-config
+              mountPath: /home/node/.docker
+              readOnly: true
+          {{- end }}
+
+          resources:
+            {{- toYaml .Values.watcher.resources | nindent 12 }}
+
+          livenessProbe:
+            exec:
+              command: ["node", "-e", "process.exit(0)"]
+            initialDelaySeconds: 30
+            periodSeconds: 60
+{{- end }}
