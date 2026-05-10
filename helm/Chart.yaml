@@ -1,6 +1,40 @@
 apiVersion: v2
 name: stackradar-scanner
-description: Periodically scans all running images in a Kubernetes cluster and uploads SBOMs to StackRadar.
+description: >-
+  Event-driven Kubernetes scanner that watches pod changes in real time,
+  generates SBOMs with Syft, and uploads them to StackRadar for continuous
+  software supply-chain visibility.
 type: application
 version: 0.1.0
 appVersion: "0.1.0"
+
+home: https://stackradar.io
+sources:
+  - https://github.com/lockdep/stackradar-scanner
+
+keywords:
+  - sbom
+  - security
+  - supply-chain
+  - scanner
+  - syft
+  - kubernetes
+
+maintainers:
+  - name: StackRadar
+    email: support@stackradar.io
+    url: https://stackradar.io
+
+icon: https://stackradar.io/icon.png
+
+annotations:
+  artifacthub.io/category: security
+  artifacthub.io/license: Apache-2.0
+  artifacthub.io/changes: |
+    - kind: added
+      description: Initial release
+  artifacthub.io/links: |
+    - name: Documentation
+      url: https://docs.stackradar.io
+    - name: Support
+      url: https://github.com/lockdep/stackradar-scanner/issues

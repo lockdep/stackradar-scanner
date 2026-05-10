@@ -1,0 +1,53 @@
+{{ template "chart.header" . }}
+{{ template "chart.deprecationWarning" . }}
+
+{{ template "chart.badgesSection" . }}
+
+{{ template "chart.description" . }}
+
+{{ template "chart.homepageLine" . }}
+
+{{ template "chart.maintainersSection" . }}
+
+{{ template "chart.sourcesSection" . }}
+
+## Prerequisites
+
+- Kubernetes 1.24+
+- Helm 3.10+
+- A StackRadar account and API key ([sign up](https://stackradar.io))
+
+## Installing the Chart
+
+```bash
+helm install stackradar-scanner oci://ghcr.io/lockdep/stackradar-scanner \
+  --namespace stackradar --create-namespace
+```
+
+Then create the credentials Secret:
+
+```bash
+kubectl create secret generic stackradar-scanner \
+  --namespace stackradar \
+  --from-literal=cluster-id=<your-cluster-id> \
+  --from-literal=api-key=<your-api-key>
+```
+
+## Passing credentials inline (CI/CD)
+
+```bash
+helm install stackradar-scanner oci://ghcr.io/lockdep/stackradar-scanner \
+  --namespace stackradar --create-namespace \
+  --set stackradar.clusterId=<your-cluster-id> \
+  --set stackradar.apiKey=<your-api-key>
+```
+
+## Using an existing Secret
+
+```bash
+helm install stackradar-scanner oci://ghcr.io/lockdep/stackradar-scanner \
+  --namespace stackradar \
+  --set stackradar.existingSecret=my-secret
+```
+
+{{ template "chart.valuesSection" . }}

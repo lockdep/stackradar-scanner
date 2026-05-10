@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "required": [],
+  "properties": {
+    "stackradar": {
+      "type": "object",
+      "properties": {
+        "apiUrl":         { "type": "string", "format": "uri" },
+        "clusterId":      { "type": "string" },
+        "apiKey":         { "type": "string" },
+        "existingSecret": { "type": "string" }
+      }
+    },
+    "scanner": {
+      "type": "object",
+      "properties": {
+        "excludeNamespaces":       { "type": "string" },
+        "includeNamespaces":       { "type": "string" },
+        "syftTimeoutMs":           { "type": "string", "pattern": "^[0-9]+$" },
+        "skipExistingDigests":     { "type": "string", "enum": ["true", "false"] },
+        "resolveImagePullSecrets": { "type": "string", "enum": ["true", "false"] }
+      }
+    },
+    "watcher": {
+      "type": "object",
+      "properties": {
+        "enabled":         { "type": "boolean" },
+        "sweepIntervalMs": { "type": "string", "pattern": "^[0-9]+$" },
+        "concurrentScans": { "type": "string", "pattern": "^[0-9]+$" },
+        "resources":       { "type": "object" }
+      }
+    },
+    "dockerConfigSecret": { "type": "string" },
+    "image": {
+      "type": "object",
+      "required": ["repository"],
+      "properties": {
+        "repository": { "type": "string" },
+        "tag":        { "type": "string" },
+        "pullPolicy": { "type": "string", "enum": ["Always", "IfNotPresent", "Never"] }
+      }
+    },
+    "imagePullSecrets":   { "type": "array" },
+    "podSecurityContext": { "type": "object" },
+    "securityContext":    { "type": "object" },
+    "nodeSelector":       { "type": "object" },
+    "tolerations":        { "type": "array" },
+    "affinity":           { "type": "object" },
+    "priorityClassName":  { "type": "string" },
+    "serviceAccount": {
+      "type": "object",
+      "properties": {
+        "create": { "type": "boolean" },
+        "name":   { "type": "string" }
+      }
+    }
+  }
+}

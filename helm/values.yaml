@@ -1,105 +1,84 @@
-# ── StackRadar connection ─────────────────────────────────────────────────────
-#
-# The scanner reads sensitive credentials from a Kubernetes Secret named after
-# the Helm release (e.g. `stackradar-scanner`) with keys `cluster-id` and
-# `api-key`. The API URL is a chart value (see `stackradar.apiUrl` below) and
-# defaults to the hosted StackRadar API, so it does not need to live in the
-# Secret.
-#
-# Recommended flow (credentials live only in Kubernetes):
-#   1. helm install stackradar-scanner oci://…/stackradar-scanner \
-#        --namespace stackradar --create-namespace
-#   2. kubectl create secret generic stackradar-scanner \
-#        --namespace stackradar \
-#        --from-literal=cluster-id=<cluster-id> \
-#        --from-file=api-key=./path-to-key-file
-#
-# Until the Secret exists, the scanner Pod will stay Pending/CrashLoopBackOff —
-# that is expected. No values need to be set below for the recommended flow.
 stackradar:
-  # Where the scanner sends SBOMs. Override only when running against a
-  # self-hosted StackRadar instance.
+  # -- StackRadar API endpoint. Override only when running against a self-hosted instance.
   apiUrl: "https://api.stackradar.io"
 
-  # Optional: pass credentials inline at install time (e.g. from a CI secret
-  # store). If apiKey is set, the chart will create the Secret above for you.
-  # Avoid in day-to-day use — values land on disk and in CI logs.
+  # -- Cluster ID to identify this cluster in StackRadar. Can be passed inline at install time
+  # instead of via a Secret (avoid in day-to-day use — values land on disk and in CI logs).
   clusterId: ""
+
+  # -- API key for StackRadar. If set, the chart creates the credentials Secret automatically.
   apiKey: ""
 
-  # Optional: reference a Secret you manage yourself (e.g. sealed-secrets,
-  # external-secrets, SOPS). If set, the chart will not create a Secret and the
-  # Deployment reads from this one instead.
-  existingSecret: ""          # Secret name
-  # existingSecretKeyApiKey: "api-key"
-  # existingSecretKeyClusterId: "cluster-id"
+  # -- Name of a pre-existing Secret with keys `cluster-id` and `api-key`.
+  # When set, the chart skips Secret creation and the Deployment reads from this Secret instead.
+  # Compatible with sealed-secrets, external-secrets, and SOPS workflows.
+  existingSecret: ""
 
-# ── Scanner behaviour ─────────────────────────────────────────────────────────
 scanner:
-  # Namespaces to skip (comma-separated). System namespaces are excluded by default.
+  # -- Comma-separated list of namespaces to exclude from scanning.
   excludeNamespaces: "kube-system,kube-public,kube-node-lease"
 
-  # Namespaces to scan (comma-separated). When set, ONLY these namespaces are scanned.
-  # includeNamespaces: ""
+  # -- Comma-separated list of namespaces to scan. When set, ONLY these namespaces are scanned.
+  includeNamespaces: ""
 
-  # Timeout per image scan in milliseconds (default: 5 min)
+  # -- Timeout per image scan in milliseconds.
   syftTimeoutMs: "300000"
 
-  # Skip images whose digest is already indexed in StackRadar (default: true).
+  # -- Skip images whose digest is already indexed in StackRadar.
   # Eliminates redundant syft runs when the image binary has not changed.
   skipExistingDigests: "true"
 
-  # Resolve imagePullSecrets from workload pod specs for private registry auth
-  # (default: true). Requires secrets get permission in the ClusterRole.
+  # -- Resolve imagePullSecrets from workload pod specs for private registry auth.
+  # Requires `secrets get` permission in the ClusterRole.
   resolveImagePullSecrets: "true"
 
-# ── Watcher (event-driven Deployment with built-in periodic sweeps) ───────────
-# On startup the informer does a full LIST of all pods (startup sweep), then
-# watches for changes in real time. A periodic sweep re-lists all pods on a
-# fixed interval to catch anything missed during informer gaps or restarts.
 watcher:
+  # -- Enable the event-driven watcher with periodic sweeps.
   enabled: true
-  # How often to run a full pod sweep in milliseconds (default: 6 hours).
-  # Set to 0 to disable periodic sweeps and rely on the informer only.
+
+  # -- How often to run a full pod sweep in milliseconds.
+  # Set to 0 to disable periodic sweeps and rely solely on the informer.
   sweepIntervalMs: "21600000"
-  # Concurrency for both event-driven and sweep scans. Each syft invocation is a
-  # Go subprocess that can use 300–600 MiB for large images (e.g. Next.js apps
-  # with big node_modules trees), and its RSS counts against this pod's cgroup
-  # limit alongside Node. Keeping this at 1 avoids OOM kills under the
-  # memory budget below.
+
+  # -- Maximum number of concurrent syft scans.
+  # Each invocation can use 300–600 MiB for large images; keeping this at 1 avoids OOM kills.
   concurrentScans: "1"
+
+  # -- Resource requests and limits for the watcher Deployment.
   resources:
     requests:
       cpu: 50m
       memory: 512Mi
     limits:
-      cpu: 2000m      # syft can be CPU-intensive during SBOM generation
+      cpu: 2000m
       memory: 1Gi
 
-# ── Private registry credentials ─────────────────────────────────────────────
-# Mount a docker config.json to allow syft to pull from private registries.
-# Create the secret with:
-#   kubectl create secret generic registry-credentials \
-#     --from-file=.dockerconfigjson=$HOME/.docker/config.json \
-#     --type=kubernetes.io/dockerconfigjson
+# -- Name of a `kubernetes.io/dockerconfigjson` Secret to mount as a docker config,
+# allowing syft to pull from private registries.
+# Create with: `kubectl create secret generic registry-credentials --from-file=.dockerconfigjson=...`
 dockerConfigSecret: ""
 
-# ── Image ─────────────────────────────────────────────────────────────────────
 image:
+  # -- Container image repository.
   repository: ghcr.io/lockdep/stackradar-scanner
+
+  # -- Image tag. Defaults to the chart appVersion when not set.
+  tag: ""
+
+  # -- Image pull policy.
   pullPolicy: Always
 
-# ── Image pull secrets ────────────────────────────────────────────────────────
+# -- List of image pull secrets for the scanner pod.
 imagePullSecrets: []
-# - name: registry-stack-radar
 
-# ── Security context ──────────────────────────────────────────────────────────
+# -- Pod-level security context.
 podSecurityContext:
   runAsNonRoot: true
   runAsUser: 65534
   runAsGroup: 65534
   fsGroup: 65534
 
+# -- Container-level security context.
 securityContext:
   allowPrivilegeEscalation: false
   readOnlyRootFilesystem: true
@@ -107,25 +86,21 @@ securityContext:
     drop:
       - ALL
 
-# ── Scheduling ────────────────────────────────────────────────────────────────
-# Assign the scanner pod to specific nodes.
+# -- Node selector for pod scheduling.
 nodeSelector: {}
-#   kubernetes.io/arch: amd64
 
-# Allow the scanner to run on tainted nodes.
+# -- Tolerations for pod scheduling on tainted nodes.
 tolerations: []
-# - key: "dedicated"
-#   operator: "Equal"
-#   value: "scanning"
-#   effect: "NoSchedule"
 
-# Fine-grained pod placement rules.
+# -- Affinity rules for fine-grained pod placement.
 affinity: {}
 
-# Set a PriorityClass so the scanner yields resources to application pods.
+# -- PriorityClassName so the scanner yields resources to application pods.
 priorityClassName: ""
 
-# ── RBAC ──────────────────────────────────────────────────────────────────────
 serviceAccount:
+  # -- Create a ServiceAccount for the scanner.
   create: true
+
+  # -- Override the ServiceAccount name. Defaults to the release name when empty.
   name: ""
