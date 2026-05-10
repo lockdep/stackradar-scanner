@@ -73,6 +73,7 @@ watcher:
       cpu: 50m
       memory: 512Mi
     limits:
+      cpu: 2000m      # syft can be CPU-intensive during SBOM generation
       memory: 1Gi
 
 # ── Private registry credentials ─────────────────────────────────────────────
@@ -92,13 +93,37 @@ image:
 imagePullSecrets: []
 # - name: registry-stack-radar
 
-# ── Resources ─────────────────────────────────────────────────────────────────
-resources:
-  requests:
-    cpu: 100m
-    memory: 1536Mi
-  limits:
-    memory: 1536Mi
+# ── Security context ──────────────────────────────────────────────────────────
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65534
+  runAsGroup: 65534
+  fsGroup: 65534
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+# ── Scheduling ────────────────────────────────────────────────────────────────
+# Assign the scanner pod to specific nodes.
+nodeSelector: {}
+#   kubernetes.io/arch: amd64
+
+# Allow the scanner to run on tainted nodes.
+tolerations: []
+# - key: "dedicated"
+#   operator: "Equal"
+#   value: "scanning"
+#   effect: "NoSchedule"
+
+# Fine-grained pod placement rules.
+affinity: {}
+
+# Set a PriorityClass so the scanner yields resources to application pods.
+priorityClassName: ""
 
 # ── RBAC ──────────────────────────────────────────────────────────────────────
 serviceAccount:

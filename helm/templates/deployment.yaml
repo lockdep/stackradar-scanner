@@ -27,21 +27,41 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-
-      {{- if .Values.dockerConfigSecret }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
       volumes:
+        - name: tmp
+          emptyDir: {}
+        {{- if .Values.dockerConfigSecret }}
         - name: docker-config
           secret:
             secretName: {{ .Values.dockerConfigSecret }}
             items:
               - key: .dockerconfigjson
                 path: config.json
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.priorityClassName }}
+      priorityClassName: {{ .Values.priorityClassName }}
       {{- end }}
 
       containers:
         - name: watcher
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
           command: ["node", "dist/src/watch.js"]
 
           env:
@@ -84,12 +104,14 @@ spec:
               value: /home/node/.docker
             {{- end }}
 
-          {{- if .Values.dockerConfigSecret }}
           volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            {{- if .Values.dockerConfigSecret }}
             - name: docker-config
               mountPath: /home/node/.docker
               readOnly: true
-          {{- end }}
+            {{- end }}
 
           resources:
             {{- toYaml .Values.watcher.resources | nindent 12 }}

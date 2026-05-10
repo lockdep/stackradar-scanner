@@ -1,0 +1,29 @@
+StackRadar Scanner has been installed.
+
+Deployment:  {{ include "stackradar-scanner.fullname" . }}-watcher
+Namespace:   {{ .Release.Namespace }}
+Sweep:       every {{ .Values.watcher.sweepIntervalMs }}ms
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Verify the watcher is running:
+
+  kubectl rollout status deployment/{{ include "stackradar-scanner.fullname" . }}-watcher \
+    -n {{ .Release.Namespace }}
+
+Watch the scanner logs:
+
+  kubectl logs -l app.kubernetes.io/name={{ include "stackradar-scanner.name" . }},app.kubernetes.io/component=watcher \
+    -n {{ .Release.Namespace }} -f
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+{{- if and (not .Values.stackradar.apiKey) (not .Values.stackradar.existingSecret) }}
+
+WARNING: No API credentials configured. Create the Secret manually before the
+         watcher can connect to StackRadar:
+
+  kubectl create secret generic {{ include "stackradar-scanner.fullname" . }} \
+    --namespace {{ .Release.Namespace }} \
+    --from-literal=cluster-id=<your-cluster-id> \
+    --from-literal=api-key=<your-api-key>
+{{- end }}
