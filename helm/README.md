@@ -25,7 +25,7 @@ Event-driven Kubernetes scanner that watches pod changes in real time, generates
 ## Installing the Chart
 
 ```bash
-helm install stackradar-scanner oci://ghcr.io/lockdep/stackradar-scanner \
+helm install stackradar-scanner oci://ghcr.io/lockdep/charts/stackradar-scanner \
   --namespace stackradar --create-namespace
 ```
 
@@ -41,7 +41,7 @@ kubectl create secret generic stackradar-scanner \
 ## Passing credentials inline (CI/CD)
 
 ```bash
-helm install stackradar-scanner oci://ghcr.io/lockdep/stackradar-scanner \
+helm install stackradar-scanner oci://ghcr.io/lockdep/charts/stackradar-scanner \
   --namespace stackradar --create-namespace \
   --set stackradar.clusterId=<your-cluster-id> \
   --set stackradar.apiKey=<your-api-key>
@@ -50,7 +50,7 @@ helm install stackradar-scanner oci://ghcr.io/lockdep/stackradar-scanner \
 ## Using an existing Secret
 
 ```bash
-helm install stackradar-scanner oci://ghcr.io/lockdep/stackradar-scanner \
+helm install stackradar-scanner oci://ghcr.io/lockdep/charts/stackradar-scanner \
   --namespace stackradar \
   --set stackradar.existingSecret=my-secret
 ```
