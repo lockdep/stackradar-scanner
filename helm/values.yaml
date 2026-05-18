@@ -65,6 +65,10 @@ image:
   # -- Image tag. Defaults to the chart appVersion when not set.
   tag: ""
 
+  # -- Image digest (sha256:...). When set, pins the exact image bytes regardless of tag
+  # and makes the tag purely informational. Populated automatically by CI for each release.
+  digest: ""
+
   # -- Image pull policy.
   pullPolicy: Always
 

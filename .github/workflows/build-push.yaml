@@ -18,6 +18,9 @@ jobs:
     permissions:
       contents: read
       packages: write
+      id-token: write  # Cosign keyless signing via GitHub Actions OIDC
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
 
     steps:
       - name: Checkout repository
@@ -48,6 +51,7 @@ jobs:
             type=raw,value=build-${{ github.run_number }},enable={{is_default_branch}}
 
       - name: Build and push image
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -56,9 +60,26 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          provenance: false
+          provenance: true
+          sbom: true
+
+      - name: Install Cosign
+        if: github.event_name != 'pull_request'
+        uses: sigstore/cosign-installer@v3
+
+      # Keyless signing — no key management needed.
+      # Verify with:
+      #   cosign verify \
+      #     --certificate-identity-regexp "https://github.com/lockdep/stackradar-scanner/.github/workflows/build-push.yaml" \
+      #     --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+      #     ghcr.io/lockdep/stackradar-scanner@<digest>
+      - name: Sign image with Cosign (keyless)
+        if: github.event_name != 'pull_request'
+        run: |
+          cosign sign --yes ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
 
   publish-chart:
+    needs: build
     runs-on: ubuntu-latest
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     permissions:
@@ -75,6 +96,11 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pin image digest in chart values
+        env:
+          DIGEST: ${{ needs.build.outputs.digest }}
+        run: yq -i '.image.digest = strenv(DIGEST)' helm/values.yaml
 
       - name: Package and push Helm chart
         run: |
@@ -94,10 +120,13 @@ jobs:
           token: ${{ secrets.GITOPS_TOKEN }}
           path: stackradar-gitops
 
-      - name: Update scanner image tag
+      - name: Update scanner image tag and digest
+        env:
+          BUILD_TAG: build-${{ github.run_number }}
+          DIGEST: ${{ needs.build.outputs.digest }}
         run: |
-          BUILD_TAG="build-${{ github.run_number }}"
-          sed -i "s/tag: .*/tag: \"${BUILD_TAG}\"/" stackradar-gitops/argocd/scanner-values.yaml
+          yq -i '.image.tag = strenv(BUILD_TAG) | .image.digest = strenv(DIGEST)' \
+            stackradar-gitops/argocd/scanner-values.yaml
 
       - name: Commit and push to gitops repo
         run: |

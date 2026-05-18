@@ -38,3 +38,7 @@ annotations:
       url: https://docs.stackradar.io
     - name: Support
       url: https://github.com/lockdep/stackradar-scanner/issues
+  artifacthub.io/images: |
+    - name: stackradar-scanner
+      image: ghcr.io/lockdep/stackradar-scanner:0.1.0
+      whitelisted: true
