@@ -63,11 +63,11 @@ image:
   repository: ghcr.io/lockdep/stackradar-scanner
 
   # -- Image tag. Defaults to the chart appVersion when not set.
-  tag: ""
+  tag: "build-10"
 
   # -- Image digest (sha256:...). When set, pins the exact image bytes regardless of tag
   # and makes the tag purely informational. Populated automatically by CI for each release.
-  digest: ""
+  digest: "sha256:f7273bdcc508671d24042ea7e104fbbc5caf86830c86529b52d51ce9cb1cec5b"
 
   # -- Image pull policy.
   pullPolicy: Always
