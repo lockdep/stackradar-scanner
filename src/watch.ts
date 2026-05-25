@@ -186,6 +186,8 @@ async function main(): Promise<void> {
     kc.loadFromCluster();
     const coreApi = kc.makeApiClient(k8s.CoreV1Api);
 
+    await heartbeat();
+
     const informer = k8s.makeInformer(
         kc,
         "/api/v1/pods",
@@ -216,10 +218,9 @@ async function main(): Promise<void> {
     await informer.start();
     log.info("watching for pod changes across all namespaces");
 
-    await heartbeat();
     setInterval(() => {
         heartbeat().catch((err) =>
-            log.error({ err: err instanceof Error ? err.message : String(err) }, "heartbeat error")
+            log.warn({ err: err instanceof Error ? err.message : String(err) }, "heartbeat failed")
         );
     }, HEARTBEAT_INTERVAL_MS);
 

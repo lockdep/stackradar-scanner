@@ -68,19 +68,14 @@ async function fetchWithRetry(
 
 export async function heartbeat(): Promise<void> {
     const url = `${API_URL}/v1/heartbeat`;
-    try {
-        const response = await fetchWithRetry(url, {
-            method: "POST",
-            headers: { "X-API-Key": API_KEY! },
-        });
-        if (!response.ok) {
-            log.warn({ status: response.status }, "heartbeat rejected by server");
-        } else {
-            log.debug("heartbeat ok");
-        }
-    } catch (err) {
-        log.warn({ err: err instanceof Error ? err.message : String(err) }, "heartbeat failed");
+    const response = await fetchWithRetry(url, {
+        method: "POST",
+        headers: { "X-API-Key": API_KEY! },
+    });
+    if (!response.ok) {
+        throw new Error(`heartbeat rejected by server: HTTP ${response.status} — check API key and API URL`);
     }
+    log.info("heartbeat ok");
 }
 
 // ─── Digest check ────────────────────────────────────────────────────────────
