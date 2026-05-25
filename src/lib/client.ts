@@ -68,12 +68,11 @@ async function fetchWithRetry(
 
 export async function heartbeat(): Promise<void> {
     const url = `${API_URL}/v1/heartbeat`;
-    const response = await fetchWithRetry(url, {
-        method: "POST",
-        headers: { "X-API-Key": API_KEY! },
-    });
+    const headers: Record<string, string> = { "X-API-Key": API_KEY! };
+    if (CLUSTER_ID) headers["X-Cluster-Id"] = CLUSTER_ID;
+    const response = await fetchWithRetry(url, { method: "POST", headers });
     if (!response.ok) {
-        throw new Error(`heartbeat rejected by server: HTTP ${response.status} — check API key and API URL`);
+        throw new Error(`heartbeat rejected by server: HTTP ${response.status} — check API key, API URL, and cluster ID`);
     }
     log.info("heartbeat ok");
 }
