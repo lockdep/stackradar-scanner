@@ -15,11 +15,10 @@ import {
     resolveRegistryAuth,
     buildTempDockerConfig,
     generateSBOM,
-    uploadSBOM,
-    checkExistingSbom,
     Semaphore,
     ImageInfo,
 } from "./lib/scan.js";
+import { heartbeat, checkExistingSbom, uploadSBOM } from "./lib/client.js";
 import { log } from "./lib/logger.js";
 import { parseImageRef } from "./parse-image-ref.js";
 
@@ -224,6 +223,8 @@ async function main(): Promise<void> {
     const coreV1Api = kc.makeApiClient(k8s.CoreV1Api);
     const appsV1Api = kc.makeApiClient(k8s.AppsV1Api);
     const batchV1Api = kc.makeApiClient(k8s.BatchV1Api);
+
+    await heartbeat();
 
     log.info("discovering images from workload resources and running pods");
     const images = await discoverImages(coreV1Api, appsV1Api, batchV1Api);

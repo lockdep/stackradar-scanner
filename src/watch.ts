@@ -16,11 +16,10 @@ import {
     resolveRegistryAuth,
     buildTempDockerConfig,
     generateSBOM,
-    uploadSBOM,
-    checkExistingSbom,
     Semaphore,
     ImageInfo,
 } from "./lib/scan.js";
+import { heartbeat, checkExistingSbom, uploadSBOM } from "./lib/client.js";
 import { log } from "./lib/logger.js";
 import { parseImageRef } from "./parse-image-ref.js";
 
@@ -31,6 +30,8 @@ validateConfig();
 const SEEN_DIGESTS_MAX = parseInt(process.env.SEEN_DIGESTS_MAX ?? "50000", 10);
 // 6 hours default; set to 0 to disable periodic sweeps
 const SWEEP_INTERVAL_MS = parseInt(process.env.SWEEP_INTERVAL_MS ?? "21600000", 10);
+// 5 minutes default; ensures scanner_last_seen_at stays fresh even when no new images appear
+const HEARTBEAT_INTERVAL_MS = parseInt(process.env.HEARTBEAT_INTERVAL_MS ?? "300000", 10);
 
 // Keyed by `${digest}::${namespace}::${containerName}` to avoid re-scanning
 // the same running container across informer re-syncs or pod restarts with
@@ -214,6 +215,13 @@ async function main(): Promise<void> {
 
     await informer.start();
     log.info("watching for pod changes across all namespaces");
+
+    await heartbeat();
+    setInterval(() => {
+        heartbeat().catch((err) =>
+            log.error({ err: err instanceof Error ? err.message : String(err) }, "heartbeat error")
+        );
+    }, HEARTBEAT_INTERVAL_MS);
 
     if (SWEEP_INTERVAL_MS > 0) {
         setInterval(async () => {
