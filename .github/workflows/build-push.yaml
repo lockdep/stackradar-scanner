@@ -11,6 +11,8 @@ on:
 env:
   REGISTRY: ghcr.io
   IMAGE: ghcr.io/lockdep/stackradar-scanner
+  CHART_REPO: ghcr.io/lockdep/charts
+  CHART_NAME: stackradar-scanner
 
 jobs:
   build:
@@ -85,6 +87,7 @@ jobs:
     permissions:
       contents: read
       packages: write
+      id-token: write  # Cosign keyless signing via GitHub Actions OIDC
 
     steps:
       - name: Checkout repository
@@ -103,9 +106,34 @@ jobs:
         run: yq -i '.image.digest = strenv(DIGEST)' helm/values.yaml
 
       - name: Package and push Helm chart
+        id: chart
         run: |
+          set -euo pipefail
           helm package helm/
-          helm push stackradar-scanner-*.tgz oci://ghcr.io/lockdep/charts
+          pkg=$(ls ${{ env.CHART_NAME }}-*.tgz)
+          # helm push reports "Pushed:" and "Digest:" on stderr
+          helm push "${pkg}" oci://${{ env.CHART_REPO }} 2>&1 | tee push.log
+          digest=$(awk '/^Digest: /{print $2}' push.log)
+          if [ -z "${digest}" ]; then
+            echo "::error::could not parse chart digest from helm push output"
+            exit 1
+          fi
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3
+
+      # Keyless signing — same OIDC identity as the container image, so the
+      # chart and the image it deploys share one provenance chain.
+      # Verify with:
+      #   cosign verify \
+      #     --certificate-identity-regexp "https://github.com/lockdep/stackradar-scanner/.github/workflows/build-push.yaml" \
+      #     --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+      #     ghcr.io/lockdep/charts/stackradar-scanner@<digest>
+      - name: Sign chart with Cosign (keyless)
+        run: |
+          cosign sign --yes \
+            ${{ env.CHART_REPO }}/${{ env.CHART_NAME }}@${{ steps.chart.outputs.digest }}
 
   update-manifests:
     needs: build
