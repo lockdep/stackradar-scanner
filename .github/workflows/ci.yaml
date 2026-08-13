@@ -121,6 +121,10 @@ jobs:
           render --set stackradar.existingSecret=my-secret
           render --set stackradar.existingSecret=my-secret --set dockerConfigSecret=regcred
           render --set stackradar.existingSecret=my-secret --set scanner.includeNamespaces=default
+          # Image exclusion. The comma inside the value is escaped, or `--set`
+          # reads it as two keys and the second pattern is silently lost.
+          render --set stackradar.existingSecret=my-secret \
+                 --set 'scanner.excludeImages=registry.k8s.io/*\,*/pause'
           render --set stackradar.existingSecret=my-secret --set watcher.enabled=false
           # The health endpoints moved off their default port. `--set-string`
           # again: a bare `=9090` reaches the schema as a number and is
@@ -462,6 +466,13 @@ jobs:
           refute "non-string imagePullSecretNames entry" "imagePullSecretNames.*string" \
             --set stackradar.existingSecret=my-secret \
             --set 'scanner.imagePullSecretNames={1,2}'
+
+          # The exclusion list is one string of patterns, and a bare `--set` of
+          # something digit-shaped reaches the schema as a number. Rejecting it
+          # by name beats an install where the env var never renders.
+          refute "non-string scanner.excludeImages" "excludeImages.*string" \
+            --set stackradar.existingSecret=my-secret \
+            --set scanner.excludeImages=1
 
           # A proxy URL with no scheme is the mistake people actually make, and
           # `format: uri` would accept it — hence the pattern in the schema.

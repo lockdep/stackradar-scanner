@@ -72,6 +72,56 @@ helm install stackradar-scanner oci://ghcr.io/lockdep/charts/stackradar-scanner 
   --set stackradar.existingSecret=my-secret
 ```
 
+## Choosing what gets scanned
+
+By default every namespace is scanned except `kube-system`, `kube-public` and
+`kube-node-lease`. `scanner.includeNamespaces` turns that around into an
+allowlist: set it and only the namespaces you name are scanned, `excludeNamespaces`
+included.
+
+Namespaces are a coarse tool for the images people most want to skip, though —
+`registry.k8s.io/pause` is on every pod in every namespace, and injected sidecars
+are cluster-wide by design. `scanner.excludeImages` is the per-image version:
+
+```bash
+helm install stackradar-scanner oci://ghcr.io/lockdep/charts/stackradar-scanner \
+  --version <version> \
+  --namespace stackradar \
+  --set stackradar.existingSecret=my-secret \
+  --set 'scanner.excludeImages=registry.k8s.io/*\,*/pause\,ghcr.io/acme/vendor-*'
+```
+
+An image matching any pattern is never scanned — no syft run, no upload, and no
+row in your dashboard. The rules:
+
+- Patterns match the image name with its `:tag` and `@sha256:...` stripped, so
+  one pattern keeps working as the tag moves.
+- `*` is the only wildcard, and it spans `/` — `registry.k8s.io/*` covers
+  `registry.k8s.io/sig-storage/csi-provisioner` too.
+- Everything else is literal, and a pattern must match the whole name.
+  `registry.k8s.io/*` does not match `myregistry.io/registry.k8s.io-mirror/app`.
+- A pattern carrying a tag or a digest could never match, so the agent drops it
+  and logs a warning naming it, rather than leaving you with a pattern that
+  quietly does nothing.
+- Names are matched as your pod spec writes them. A pod running plain `nginx`
+  is matched by `nginx`, not by `docker.io/library/*` — nothing here expands the
+  implicit Docker Hub prefix.
+
+Escaping the commas is not optional: an unescaped one makes `--set` read the
+rest as a second key, and the pattern after it is silently lost. In a values
+file the value is one ordinary string and no escaping is needed.
+
+The agent logs the patterns it ended up with on startup, next to the rest of its
+configuration. Worth reading after a change — an over-broad pattern removes
+coverage without any other signal that it did:
+
+```bash
+kubectl logs -n stackradar deploy/stackradar-scanner-watcher | head -1
+```
+
+Skipped images are logged individually at `debug` (`LOG_LEVEL=debug`), which is
+how you confirm a pattern is hitting what you meant it to.
+
 ## Behind a corporate proxy
 
 In a cluster with no direct internet egress, point the agent at your proxy:

@@ -27,6 +27,18 @@ scanner:
   # -- Comma-separated list of namespaces to scan. When set, ONLY these namespaces are scanned.
   includeNamespaces: ""
 
+  # -- Comma-separated glob patterns for images that are never scanned, whatever
+  # namespace they run in. Matched against the image name with its tag and digest
+  # stripped, so a pattern written once keeps working as the tag moves. `*` is the
+  # only wildcard and it spans `/`; everything else is literal, and patterns match
+  # the whole name — `registry.k8s.io/*` covers `registry.k8s.io/pause:3.9` but not
+  # `myregistry.io/registry.k8s.io-mirror/app`. A pattern that carries a `:tag` or
+  # an `@sha256:...` could never match, so it is dropped with a warning at startup
+  # rather than silently doing nothing. The agent logs the patterns it ended up
+  # with when it starts — worth reading, since an over-broad one drops coverage
+  # quietly. Example: "registry.k8s.io/*,*/pause,ghcr.io/acme/vendor-*"
+  excludeImages: ""
+
   # -- Timeout per image scan in milliseconds.
   syftTimeoutMs: "300000"
 

@@ -143,10 +143,16 @@ dropped before anything is sent.
   image is uploaded, never file contents.
 - **Any label or annotation outside the allowlists above**, and raw pod names.
 
-### Namespaces
+### Namespaces and images
 
 `kube-system`, `kube-public` and `kube-node-lease` are excluded by default. Set
 `scanner.includeNamespaces` to restrict scanning to an explicit list instead.
+
+`scanner.excludeImages` skips individual images wherever they run — a
+comma-separated list of glob patterns matched against the image name with its
+tag and digest stripped, e.g. `registry.k8s.io/*,*/pause`. A matching image is
+never scanned, so it costs no syft run and produces no findings. See
+[Choosing what gets scanned](helm/README.md#choosing-what-gets-scanned).
 
 ### Security posture of the pod
 

@@ -25,6 +25,7 @@
       "properties": {
         "excludeNamespaces":       { "type": "string" },
         "includeNamespaces":       { "type": "string" },
+        "excludeImages":           { "type": "string" },
         "syftTimeoutMs":           { "type": "string", "pattern": "^[0-9]+$" },
         "skipExistingDigests":     { "type": "string", "enum": ["true", "false"] },
         "resolveImagePullSecrets": { "type": "string", "enum": ["true", "false"] },

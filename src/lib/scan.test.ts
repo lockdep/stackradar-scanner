@@ -8,6 +8,7 @@ import {
     pickPodAnnotations,
     deriveWorkloadName,
     shouldScan,
+    stripTagAndDigest,
     resolveRegistryAuth,
 } from "./scan.js";
 
@@ -244,6 +245,176 @@ describe("shouldScan", () => {
         const fn = await load({ INCLUDE_NAMESPACES: " payments , checkout " });
         expect(fn("payments")).toBe(true);
         expect(fn("checkout")).toBe(true);
+    });
+});
+
+describe("stripTagAndDigest", () => {
+    const cases: Array<[ref: string, expected: string]> = [
+        ["registry.k8s.io/pause:3.9", "registry.k8s.io/pause"],
+        ["registry.k8s.io/pause", "registry.k8s.io/pause"],
+        [
+            "ghcr.io/acme/api@sha256:" + "a".repeat(64),
+            "ghcr.io/acme/api",
+        ],
+        // Both at once — the form a pod status usually carries.
+        [
+            "ghcr.io/acme/api:1.4.2@sha256:" + "a".repeat(64),
+            "ghcr.io/acme/api",
+        ],
+        // A registry with a port. The colon is not a tag separator here, and
+        // truncating at it would leave a pattern matching the host alone.
+        ["registry.internal:5000/acme/api:1.4.2", "registry.internal:5000/acme/api"],
+        ["registry.internal:5000/acme/api", "registry.internal:5000/acme/api"],
+        // No registry at all: docker.io is implied but never written out, and
+        // nothing here invents it.
+        ["nginx:1.27", "nginx"],
+        ["nginx", "nginx"],
+    ];
+
+    for (const [ref, expected] of cases) {
+        it(`${ref} -> ${expected}`, () => {
+            expect(stripTagAndDigest(ref)).toBe(expected);
+        });
+    }
+});
+
+describe("shouldScanImage", () => {
+    // Patterns are compiled once at module load, so each case needs a fresh
+    // module instance — and a fresh logger with it, since resetModules gives
+    // the reloaded scan.js its own copy of logger.js that a spy on this file's
+    // import would never see.
+    const load = async (excludeImages?: string) => {
+        vi.resetModules();
+        const warn = vi.fn();
+        vi.doMock("./logger.js", () => ({
+            log: { warn, info: vi.fn(), debug: vi.fn(), error: vi.fn(), fatal: vi.fn() },
+        }));
+        if (excludeImages === undefined) delete process.env.EXCLUDE_IMAGES;
+        else process.env.EXCLUDE_IMAGES = excludeImages;
+
+        const mod = await import("./scan.js");
+        return { shouldScanImage: mod.shouldScanImage, patterns: mod.EXCLUDE_IMAGES, warn };
+    };
+
+    const savedEnv = { ...process.env };
+    afterEach(() => {
+        vi.doUnmock("./logger.js");
+        vi.resetModules();
+        process.env = { ...savedEnv };
+    });
+
+    // The default. An install that sets nothing must behave exactly as it did
+    // before this value existed.
+    it("scans everything when no patterns are set", async () => {
+        const { shouldScanImage, patterns } = await load(undefined);
+        expect(patterns).toEqual([]);
+        expect(shouldScanImage("registry.k8s.io/pause:3.9")).toBe(true);
+        expect(shouldScanImage("ghcr.io/acme/api:1.4.2")).toBe(true);
+        expect(shouldScanImage("")).toBe(true);
+    });
+
+    it("treats an empty and a whitespace-only list as unset", async () => {
+        for (const value of ["", " , "]) {
+            const { shouldScanImage, patterns } = await load(value);
+            expect(patterns).toEqual([]);
+            expect(shouldScanImage("registry.k8s.io/pause:3.9")).toBe(true);
+        }
+    });
+
+    describe("a registry prefix", () => {
+        it("skips images under it, at any depth", async () => {
+            const { shouldScanImage } = await load("registry.k8s.io/*");
+            expect(shouldScanImage("registry.k8s.io/pause:3.9")).toBe(false);
+            expect(shouldScanImage("registry.k8s.io/kube-proxy:v1.31.0")).toBe(false);
+            expect(shouldScanImage("registry.k8s.io/sig-storage/csi-provisioner:v4.0.0")).toBe(false);
+        });
+
+        // Anchored at both ends, which is the whole reason a mirror is safe:
+        // the host has to *be* registry.k8s.io, not merely contain it.
+        it("does not skip a registry that only contains the pattern", async () => {
+            const { shouldScanImage } = await load("registry.k8s.io/*");
+            expect(shouldScanImage("myregistry.io/registry.k8s.io-mirror/app:1.0")).toBe(true);
+            expect(shouldScanImage("registry.k8s.io.evil.example/pause:3.9")).toBe(true);
+        });
+    });
+
+    it("matches a trailing name regardless of registry host", async () => {
+        const { shouldScanImage } = await load("*/pause");
+        expect(shouldScanImage("registry.k8s.io/pause:3.9")).toBe(false);
+        expect(shouldScanImage("k8s.gcr.io/pause:3.5")).toBe(false);
+        expect(shouldScanImage("mcr.microsoft.com/oss/kubernetes/pause:3.6")).toBe(false);
+        expect(shouldScanImage("registry.k8s.io/pause-something:3.9")).toBe(true);
+    });
+
+    // The point of stripping: a pattern written once keeps working as the tag
+    // moves and as the digest changes underneath it.
+    it("matches against the tag- and digest-stripped name", async () => {
+        const { shouldScanImage } = await load("ghcr.io/acme/vendor-*");
+        const digest = "@sha256:" + "b".repeat(64);
+        expect(shouldScanImage("ghcr.io/acme/vendor-agent")).toBe(false);
+        expect(shouldScanImage("ghcr.io/acme/vendor-agent:2.1.0")).toBe(false);
+        expect(shouldScanImage("ghcr.io/acme/vendor-agent" + digest)).toBe(false);
+        expect(shouldScanImage("ghcr.io/acme/vendor-agent:2.1.0" + digest)).toBe(false);
+    });
+
+    it("takes several patterns, trimming whitespace around them", async () => {
+        const { shouldScanImage, patterns } = await load(
+            " registry.k8s.io/* , */pause , ghcr.io/acme/vendor-* "
+        );
+        expect(patterns).toEqual(["registry.k8s.io/*", "*/pause", "ghcr.io/acme/vendor-*"]);
+        expect(shouldScanImage("registry.k8s.io/kube-proxy:v1.31.0")).toBe(false);
+        expect(shouldScanImage("docker.io/library/pause:3.9")).toBe(false);
+        expect(shouldScanImage("ghcr.io/acme/vendor-agent:2.1.0")).toBe(false);
+        expect(shouldScanImage("ghcr.io/acme/payments-api:1.4.2")).toBe(true);
+    });
+
+    // Regex metacharacters are literal. A dot in a hostname is a dot, so a
+    // pattern is never quietly broader than it reads.
+    it("treats everything but * as a literal", async () => {
+        const { shouldScanImage } = await load("ghcr.io/acme/api");
+        expect(shouldScanImage("ghcr.io/acme/api:1.4.2")).toBe(false);
+        expect(shouldScanImage("ghcrxio/acme/api:1.4.2")).toBe(true);
+        expect(shouldScanImage("ghcr.io/acme/apis:1.4.2")).toBe(true);
+    });
+
+    it("keeps a registry port in the pattern working", async () => {
+        const { shouldScanImage, patterns } = await load("registry.internal:5000/*");
+        expect(patterns).toEqual(["registry.internal:5000/*"]);
+        expect(shouldScanImage("registry.internal:5000/acme/api:1.4.2")).toBe(false);
+        expect(shouldScanImage("ghcr.io/acme/api:1.4.2")).toBe(true);
+    });
+
+    // A pattern carrying a tag can never match, because matching happens
+    // against the stripped name. Dropping it errs towards scanning: the cost
+    // is one scan that was meant to be skipped, not coverage lost — and the
+    // warning is how someone finds out their pattern is doing nothing.
+    describe("a pattern that cannot match", () => {
+        it("is dropped, with a warning naming it, and the agent keeps running", async () => {
+            const { shouldScanImage, patterns, warn } = await load("registry.k8s.io/pause:3.9");
+            expect(patterns).toEqual([]);
+            expect(shouldScanImage("registry.k8s.io/pause:3.9")).toBe(true);
+            expect(warn).toHaveBeenCalledTimes(1);
+            const [fields] = warn.mock.calls[0] as [Record<string, unknown>, string];
+            expect(fields).toMatchObject({ pattern: "registry.k8s.io/pause:3.9" });
+        });
+
+        it("is dropped when it carries a digest", async () => {
+            const { patterns, warn } = await load("ghcr.io/acme/api@sha256:" + "c".repeat(64));
+            expect(patterns).toEqual([]);
+            expect(warn).toHaveBeenCalledTimes(1);
+        });
+
+        // The one that matters most: a bad pattern must not take the good ones
+        // down with it, or a typo turns off exclusion the operator still wants.
+        it("does not stop the patterns beside it from working", async () => {
+            const { shouldScanImage, patterns, warn } = await load(
+                "registry.k8s.io/pause:3.9,*/pause"
+            );
+            expect(patterns).toEqual(["*/pause"]);
+            expect(warn).toHaveBeenCalledTimes(1);
+            expect(shouldScanImage("registry.k8s.io/pause:3.9")).toBe(false);
+            expect(shouldScanImage("ghcr.io/acme/api:1.4.2")).toBe(true);
+        });
     });
 });
 

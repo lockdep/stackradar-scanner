@@ -157,6 +157,10 @@ spec:
             - name: INCLUDE_NAMESPACES
               value: {{ .Values.scanner.includeNamespaces | quote }}
             {{- end }}
+            {{- if .Values.scanner.excludeImages }}
+            - name: EXCLUDE_IMAGES
+              value: {{ .Values.scanner.excludeImages | quote }}
+            {{- end }}
             - name: SYFT_TIMEOUT_MS
               value: {{ .Values.scanner.syftTimeoutMs | quote }}
             - name: CONCURRENT_SCANS

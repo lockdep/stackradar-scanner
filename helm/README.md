@@ -77,6 +77,56 @@ helm install stackradar-scanner oci://ghcr.io/lockdep/charts/stackradar-scanner 
   --set stackradar.existingSecret=my-secret
 ```
 
+## Choosing what gets scanned
+
+By default every namespace is scanned except `kube-system`, `kube-public` and
+`kube-node-lease`. `scanner.includeNamespaces` turns that around into an
+allowlist: set it and only the namespaces you name are scanned, `excludeNamespaces`
+included.
+
+Namespaces are a coarse tool for the images people most want to skip, though —
+`registry.k8s.io/pause` is on every pod in every namespace, and injected sidecars
+are cluster-wide by design. `scanner.excludeImages` is the per-image version:
+
+```bash
+helm install stackradar-scanner oci://ghcr.io/lockdep/charts/stackradar-scanner \
+  --version <version> \
+  --namespace stackradar \
+  --set stackradar.existingSecret=my-secret \
+  --set 'scanner.excludeImages=registry.k8s.io/*\,*/pause\,ghcr.io/acme/vendor-*'
+```
+
+An image matching any pattern is never scanned — no syft run, no upload, and no
+row in your dashboard. The rules:
+
+- Patterns match the image name with its `:tag` and `@sha256:...` stripped, so
+  one pattern keeps working as the tag moves.
+- `*` is the only wildcard, and it spans `/` — `registry.k8s.io/*` covers
+  `registry.k8s.io/sig-storage/csi-provisioner` too.
+- Everything else is literal, and a pattern must match the whole name.
+  `registry.k8s.io/*` does not match `myregistry.io/registry.k8s.io-mirror/app`.
+- A pattern carrying a tag or a digest could never match, so the agent drops it
+  and logs a warning naming it, rather than leaving you with a pattern that
+  quietly does nothing.
+- Names are matched as your pod spec writes them. A pod running plain `nginx`
+  is matched by `nginx`, not by `docker.io/library/*` — nothing here expands the
+  implicit Docker Hub prefix.
+
+Escaping the commas is not optional: an unescaped one makes `--set` read the
+rest as a second key, and the pattern after it is silently lost. In a values
+file the value is one ordinary string and no escaping is needed.
+
+The agent logs the patterns it ended up with on startup, next to the rest of its
+configuration. Worth reading after a change — an over-broad pattern removes
+coverage without any other signal that it did:
+
+```bash
+kubectl logs -n stackradar deploy/stackradar-scanner-watcher | head -1
+```
+
+Skipped images are logged individually at `debug` (`LOG_LEVEL=debug`), which is
+how you confirm a pattern is hitting what you meant it to.
+
 ## Behind a corporate proxy
 
 In a cluster with no direct internet egress, point the agent at your proxy:
@@ -359,6 +409,7 @@ See [RELEASING.md](https://github.com/lockdep/stackradar-scanner/blob/main/RELEA
 | proxy.httpProxy | string | `""` | HTTP proxy URL for outbound traffic, e.g. `http://proxy.corp:8080`. Include the scheme — a bare `proxy.corp:8080` is rejected, because tools that read these variables disagree about what a scheme-less value means. |
 | proxy.httpsProxy | string | `""` | HTTPS proxy URL for outbound traffic. Set this one if you set only one: the StackRadar API and most registries are reached over https. |
 | proxy.noProxy | string | `""` | Comma-separated hosts that bypass the proxy. The in-cluster Kubernetes API (`kubernetes.default.svc`, `.svc`, `.cluster.local`, `localhost`, `127.0.0.1`) is always appended, so list only your own internal registries here. |
+| scanner.excludeImages | string | `""` | Comma-separated glob patterns for images that are never scanned, whatever namespace they run in. Matched against the image name with its tag and digest stripped, so a pattern written once keeps working as the tag moves. `*` is the only wildcard and it spans `/`; everything else is literal, and patterns match the whole name — `registry.k8s.io/*` covers `registry.k8s.io/pause:3.9` but not `myregistry.io/registry.k8s.io-mirror/app`. A pattern that carries a `:tag` or an `@sha256:...` could never match, so it is dropped with a warning at startup rather than silently doing nothing. The agent logs the patterns it ended up with when it starts — worth reading, since an over-broad one drops coverage quietly. Example: "registry.k8s.io/*,*/pause,ghcr.io/acme/vendor-*" |
 | scanner.excludeNamespaces | string | `"kube-system,kube-public,kube-node-lease"` | Comma-separated list of namespaces to exclude from scanning. |
 | scanner.imagePullSecretNames | list | `[]` | Names of the imagePullSecrets the scanner is allowed to read. When empty, the ClusterRole grants `secrets get` cluster-wide. Naming your pull secrets here narrows the grant to those names via RBAC `resourceNames` — the recommended setting. Names match in every namespace: a Secret called `regcred` anywhere in the cluster is readable, so use distinct names if that matters to you. A Secret left off the list is not readable, and images that need it fall back to an anonymous pull — the agent logs a warning naming the Secret. Only used when `scanner.resolveImagePullSecrets` is "true". |
 | scanner.includeNamespaces | string | `""` | Comma-separated list of namespaces to scan. When set, ONLY these namespaces are scanned. |

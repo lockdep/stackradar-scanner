@@ -38,6 +38,15 @@ export const INCLUDE_NAMESPACES = includeNamespaces.length > 0
     ? new Set(includeNamespaces)
     : null;
 
+// Glob patterns for images that are never scanned, whatever namespace they run
+// in. Read here, compiled to regexes once under "Image filtering" below rather
+// than per pod event — the informer calls into that on every pod add and update
+// in the cluster.
+const excludeImagePatterns = (process.env.EXCLUDE_IMAGES ?? "")
+    .split(",")
+    .map((p) => p.trim())
+    .filter(Boolean);
+
 export const SYFT_TIMEOUT_MS = parseInt(process.env.SYFT_TIMEOUT_MS ?? "300000", 10);
 export const CLUSTER_NAME = process.env.CLUSTER_NAME?.trim() || undefined;
 export const CLUSTER_ID = process.env.STACKRADAR_CLUSTER_ID?.trim() || undefined;
@@ -124,6 +133,86 @@ export class Semaphore {
 export function shouldScan(namespace: string): boolean {
     if (INCLUDE_NAMESPACES) return INCLUDE_NAMESPACES.has(namespace);
     return !EXCLUDE_NAMESPACES.has(namespace);
+}
+
+// ─── Image filtering ─────────────────────────────────────────────────────────
+
+/**
+ * Drops the `:tag` and the `@sha256:...` from an image reference.
+ *
+ * So that a pattern written once keeps working as the tag moves. The colon is
+ * only a tag separator when it comes after the last `/` — `registry:5000/pause`
+ * is a registry with a port, not an image with a tag, and truncating it there
+ * would turn the pattern into one that matches the host alone.
+ */
+export function stripTagAndDigest(imageRef: string): string {
+    const withoutDigest = imageRef.split("@")[0]!;
+    const lastSlash = withoutDigest.lastIndexOf("/");
+    const lastColon = withoutDigest.lastIndexOf(":");
+    return lastColon > lastSlash ? withoutDigest.slice(0, lastColon) : withoutDigest;
+}
+
+/**
+ * Compiles one exclusion pattern, or returns `null` for one that cannot work.
+ *
+ * `*` is the only wildcard, and it spans `/` — `registry.k8s.io/*` is meant to
+ * cover nested repositories too. Everything else is escaped, so a pattern is a
+ * literal match plus wildcards and nothing more; anchoring both ends is what
+ * keeps `registry.k8s.io/*` off `myregistry.io/registry.k8s.io-mirror/app`.
+ *
+ * A pattern is rejected rather than applied when it carries a tag or a digest:
+ * matching happens against the stripped name, so such a pattern could never
+ * fire, and silently keeping it means someone believes an image is excluded
+ * while it is being scanned. Rejecting is the safe direction — the cost is a
+ * scan that was meant to be skipped, not coverage lost.
+ */
+function compileExcludePattern(pattern: string): RegExp | null {
+    if (stripTagAndDigest(pattern) !== pattern) {
+        log.warn(
+            { pattern },
+            "ignoring EXCLUDE_IMAGES pattern with a tag or digest — patterns match the " +
+            "image name with both stripped, so this one can never match; drop the " +
+            "`:tag` / `@sha256:...` from it"
+        );
+        return null;
+    }
+
+    try {
+        const escaped = pattern
+            .replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+            .replace(/\\\*/g, ".*");
+        return new RegExp(`^${escaped}$`);
+    } catch (err) {
+        // Unreachable with everything escaped, and kept anyway: a bad glob in a
+        // values file must not take a cluster's coverage offline, and the only
+        // way to be sure of that is to not throw here.
+        log.warn(
+            { pattern, err: err instanceof Error ? err.message : String(err) },
+            "ignoring unparseable EXCLUDE_IMAGES pattern"
+        );
+        return null;
+    }
+}
+
+const excludeImageRegexes: RegExp[] = [];
+
+// The patterns that compiled, in the order they were given. Exported for the
+// startup log: an over-broad pattern silently drops coverage, and this line is
+// where someone finds out which patterns their cluster is actually running.
+export const EXCLUDE_IMAGES: string[] = [];
+
+for (const pattern of excludeImagePatterns) {
+    const regex = compileExcludePattern(pattern);
+    if (regex) {
+        excludeImageRegexes.push(regex);
+        EXCLUDE_IMAGES.push(pattern);
+    }
+}
+
+export function shouldScanImage(imageRef: string): boolean {
+    if (excludeImageRegexes.length === 0) return true;
+    const name = stripTagAndDigest(imageRef);
+    return !excludeImageRegexes.some((re) => re.test(name));
 }
 
 // ─── Pod label / annotation helpers ──────────────────────────────────────────

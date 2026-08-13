@@ -9,7 +9,9 @@ import {
     RESOLVE_IMAGE_PULL_SECRETS,
     EXCLUDE_NAMESPACES,
     INCLUDE_NAMESPACES,
+    EXCLUDE_IMAGES,
     shouldScan,
+    shouldScanImage,
     pickPodLabels,
     pickPodAnnotations,
     deriveWorkloadName,
@@ -81,6 +83,20 @@ async function handlePod(pod: k8s.V1Pod, coreApi: k8s.CoreV1Api): Promise<void> 
     for (const cs of allStatuses) {
         const isActive = cs.state?.running || cs.state?.terminated;
         if (!cs.imageID || !isActive) continue;
+
+        // Ahead of the dedup key and everything after it: an excluded image
+        // costs nothing at all, not even a slot in `seenDigests`. Matched on
+        // `cs.image` — the reference the pod spec asked for, which is what the
+        // patterns are written against — rather than on the resolved
+        // `imageID`, which for many runtimes is a bare digest with no name in
+        // it to match.
+        if (!shouldScanImage(cs.image ?? "")) {
+            log.debug(
+                { image: cs.image, namespace, container: cs.name },
+                "image excluded by EXCLUDE_IMAGES, skipping"
+            );
+            continue;
+        }
 
         const normalized = cs.imageID.replace(/^docker-pullable:\/\//, "");
         const digestMatch = normalized.match(/sha256:[a-f0-9]{64}/);
@@ -206,6 +222,7 @@ async function main(): Promise<void> {
         scannerVersion: SCANNER_VERSION,
         excludeNamespaces: [...EXCLUDE_NAMESPACES],
         includeNamespaces: INCLUDE_NAMESPACES ? [...INCLUDE_NAMESPACES] : undefined,
+        excludeImages: EXCLUDE_IMAGES,
         concurrentScans: CONCURRENT_SCANS,
         skipExistingDigests: SKIP_EXISTING_DIGESTS,
         resolveImagePullSecrets: RESOLVE_IMAGE_PULL_SECRETS,

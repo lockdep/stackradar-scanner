@@ -20,6 +20,29 @@ Removed, Fixed, Security — so use those six and nothing else.
 
 ### Added
 
+- `scanner.excludeImages` — a comma-separated list of glob patterns for images
+  you never want scanned, whatever namespace they run in. Namespace filtering
+  was the only tool for this, and it is the wrong shape for the images people
+  actually want to skip: `registry.k8s.io/pause` is on every pod in every
+  namespace, and injected sidecars are cluster-wide by design. A matching image
+  costs no syft run, no upload, and no rows in your dashboard.
+
+  Patterns are matched against the image name with its `:tag` and
+  `@sha256:...` stripped, so one pattern keeps working as the tag moves. `*` is
+  the only wildcard and it spans `/`; everything else is literal and a pattern
+  has to match the whole name, so `registry.k8s.io/*` covers
+  `registry.k8s.io/sig-storage/csi-provisioner` but not
+  `myregistry.io/registry.k8s.io-mirror/app`. A pattern that carries a tag or a
+  digest could never match, so the agent drops it and logs a warning naming it
+  rather than leaving you with one that quietly does nothing — and one bad
+  pattern does not disturb the rest of the list.
+
+  The default is empty and renders no env var at all, so nothing changes for
+  existing installs. Once you set it, the agent lists the active patterns in its
+  startup log line and logs each skipped image at `debug` — worth checking after
+  a change, since an over-broad pattern removes coverage with no other signal
+  that it did.
+
 - `watcher.healthPort` — the port the agent's new liveness and readiness
   endpoints listen on, `8081` by default. Nothing exposes it through a Service;
   the kubelet reaches it on the pod IP. Change it only if something else in the
