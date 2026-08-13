@@ -128,6 +128,18 @@ image:
 # -- List of image pull secrets for the scanner pod.
 imagePullSecrets: []
 
+# -- Extra labels for the scanner pod. Azure Workload Identity is switched on
+# here, with `azure.workload.identity/use: "true"`. The chart's own labels win
+# on a collision: `app.kubernetes.io/name`, `app.kubernetes.io/instance` and
+# `app.kubernetes.io/component` are part of the Deployment's selector and are
+# immutable after creation, so a value that displaced one would break the next
+# `helm upgrade` rather than this install.
+podLabels: {}
+
+# -- Extra annotations for the scanner pod, e.g. the client ID Azure Workload
+# Identity reads (`azure.workload.identity/client-id`).
+podAnnotations: {}
+
 # -- Pod-level security context.
 podSecurityContext:
   runAsNonRoot: true
@@ -168,3 +180,11 @@ serviceAccount:
 
   # -- Override the ServiceAccount name. Defaults to the release name when empty.
   name: ""
+
+  # -- Annotations for the ServiceAccount. This is where cloud workload identity
+  # is wired up — `eks.amazonaws.com/role-arn` on EKS,
+  # `iam.gke.io/gcp-service-account` on GKE — so the pod receives short-lived
+  # credentials from the cloud instead of a static `dockerConfigSecret`. Only
+  # meaningful with `serviceAccount.create: true`; setting both fails the render
+  # rather than putting the annotations nowhere.
+  annotations: {}

@@ -20,6 +20,27 @@ Removed, Fixed, Security — so use those six and nothing else.
 
 ### Added
 
+- `serviceAccount.annotations`, `podLabels` and `podAnnotations` — pull from
+  your cloud's own registry using workload identity instead of a static
+  credential. Annotate the ServiceAccount for EKS IRSA
+  (`eks.amazonaws.com/role-arn`) or GKE Workload Identity
+  (`iam.gke.io/gcp-service-account`); Azure Workload Identity reads a pod label
+  and a pod annotation, so it needs the other two. Previously the only way to
+  reach ECR, ACR or Artifact Registry was `dockerConfigSecret` — which on ECR
+  means a 12-hour token and a CronJob of your own to refresh it.
+
+  Not yet verified end to end on any of the three clouds: the chart renders what
+  each mechanism documents and the injected credentials reach the pod, but
+  whether syft's registry client picks them up without a credential helper is
+  untested per cloud. `helm/README.md` says so, and says which knob goes with
+  which cloud. `dockerConfigSecret` still works and is unchanged.
+
+  `podLabels` cannot displace `app.kubernetes.io/name`, `/instance` or
+  `/component` — they are in the Deployment's selector, which is immutable
+  after creation, so the chart's own labels win the merge rather than letting
+  you build a release that only fails on the next upgrade. All three values
+  default to empty and render nothing, so nothing changes for existing installs.
+
 - `scanner.imagePullSecretNames` — name the pull secrets the scanner may read
   and its `secrets get` grant narrows to exactly those, through RBAC
   `resourceNames`. Previously the only choice was cluster-wide `secrets get` or

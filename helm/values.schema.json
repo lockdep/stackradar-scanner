@@ -78,6 +78,16 @@
       }
     },
     "imagePullSecrets":   { "type": "array" },
+
+    "podLabels": {
+      "type": "object",
+      "$comment": "Typed as a map of strings rather than left open like nodeSelector: Kubernetes rejects a non-string label value, and `--set podLabels.foo=1` produces exactly that. Caught here, the error names the key instead of arriving from the API server at install time.",
+      "additionalProperties": { "type": "string" }
+    },
+    "podAnnotations": {
+      "type": "object",
+      "additionalProperties": { "type": "string" }
+    },
     "podSecurityContext": { "type": "object" },
     "securityContext":    { "type": "object" },
     "nodeSelector":       { "type": "object" },
@@ -90,8 +100,13 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "create": { "type": "boolean" },
-        "name":   { "type": "string" }
+        "create":      { "type": "boolean" },
+        "name":        { "type": "string" },
+        "annotations": {
+          "type": "object",
+          "$comment": "Same reasoning as podLabels: annotation values are strings to Kubernetes, so a role ARN typo'd into a number fails here by name.",
+          "additionalProperties": { "type": "string" }
+        }
       }
     }
   }

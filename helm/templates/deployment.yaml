@@ -56,9 +56,12 @@ spec:
       app.kubernetes.io/component: watcher
   template:
     metadata:
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       labels:
-        {{- include "stackradar-scanner.labels" . | nindent 8 }}
-        app.kubernetes.io/component: watcher
+        {{- include "stackradar-scanner.podLabels" (dict "root" . "component" "watcher") | nindent 8 }}
     spec:
       serviceAccountName: {{ include "stackradar-scanner.serviceAccountName" . }}
       {{- with .Values.imagePullSecrets }}

@@ -146,6 +146,87 @@ container running `update-ca-certificates` has nowhere to put the result.
 Leave both names empty — the default — and no volume and no environment
 variables are rendered at all.
 
+## Pulling from your cloud's own registry
+
+To read a private image the scanner needs credentials for the registry it lives
+in. On a managed cluster the modern way to get them is workload identity: you
+bind the scanner's ServiceAccount to a cloud identity, the cloud injects
+short-lived credentials into the pod, and nothing static is ever stored in the
+cluster. The alternative — `dockerConfigSecret` — means minting a long-lived
+credential and, on ECR, refreshing a 12-hour token with a CronJob you write
+yourself.
+
+The chart exposes the three knobs every mechanism is wired up through:
+
+| Value | Used by |
+|---|---|
+| `serviceAccount.annotations` | EKS IRSA, GKE Workload Identity |
+| `podLabels` | Azure Workload Identity |
+| `podAnnotations` | Azure Workload Identity |
+
+Create the cloud-side identity and grant it read access to your registry
+following your cloud vendor's documentation — the exact IAM shape changes often
+enough that repeating it here would only mislead you — then point the chart at
+it.
+
+**EKS** — [IAM roles for service accounts](https://docs.aws.amazon.com/eks/latest/userguide/iam-roles-for-service-accounts.html):
+
+```bash
+helm upgrade stackradar-scanner oci://ghcr.io/lockdep/charts/stackradar-scanner \
+  --version <version> \
+  --namespace stackradar --reuse-values \
+  --set-string 'serviceAccount.annotations.eks\.amazonaws\.com/role-arn=arn:aws:iam::<account>:role/<role>'
+```
+
+**GKE** — [Workload Identity Federation](https://cloud.google.com/kubernetes-engine/docs/how-to/workload-identity):
+
+```bash
+helm upgrade stackradar-scanner oci://ghcr.io/lockdep/charts/stackradar-scanner \
+  --version <version> \
+  --namespace stackradar --reuse-values \
+  --set-string 'serviceAccount.annotations.iam\.gke\.io/gcp-service-account=<name>@<project>.iam.gserviceaccount.com'
+```
+
+**AKS** — [Azure Workload Identity](https://azure.github.io/azure-workload-identity/docs/), which
+reads a label on the pod as well as an annotation:
+
+```bash
+helm upgrade stackradar-scanner oci://ghcr.io/lockdep/charts/stackradar-scanner \
+  --version <version> \
+  --namespace stackradar --reuse-values \
+  --set-string 'podLabels.azure\.workload\.identity/use=true' \
+  --set-string 'podAnnotations.azure\.workload\.identity/client-id=<client-id>' \
+  --set-string 'serviceAccount.annotations.azure\.workload\.identity/client-id=<client-id>'
+```
+
+`--set-string` in every example above, and it matters for the Azure one:
+`azure.workload.identity/use` is the *string* `"true"`, and a plain `--set`
+turns it into a boolean that the chart rejects at install time.
+
+**Not yet verified end to end.** These render the annotations and labels the
+three mechanisms document, and the credentials the cloud injects reach the
+scanner's environment. What has not been confirmed on a real cluster of each
+kind is the last step — whether syft's registry client picks those credentials
+up on its own. It reads a docker config and the credential helpers named in it,
+and the image ships no cloud credential helper binaries, so it is possible that
+one or more of the three needs help we have not built yet. If a pull still fails
+after you have wired the identity up and confirmed the cloud side is right, that
+is worth [telling us](https://github.com/lockdep/stackradar-scanner/issues) —
+`dockerConfigSecret` remains the fallback that is known to work everywhere. This
+note goes away per cloud as each one is verified.
+
+Annotating a ServiceAccount the chart does not create does nothing, so
+`serviceAccount.annotations` together with `serviceAccount.create: false` fails
+the install rather than leaving you with a pod that has no credentials and no
+explanation. Annotate your own ServiceAccount yourself in that case.
+
+`podLabels` are merged into the pod template's labels, and the chart's own
+labels win a collision: `app.kubernetes.io/name`, `app.kubernetes.io/instance`
+and `app.kubernetes.io/component` are part of the Deployment's selector, which
+Kubernetes will not let you change after the Deployment exists. An entry that
+displaced one would install cleanly and break your next upgrade, so it is
+dropped instead.
+
 ## Verifying the release
 
 The chart and the image it deploys are signed with [cosign](https://docs.sigstore.dev/)

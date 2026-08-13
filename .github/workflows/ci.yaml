@@ -162,6 +162,23 @@ jobs:
           render --set stackradar.existingSecret=my-secret \
                  --set caBundle.configMapName=corp-ca \
                  --set proxy.httpsProxy=http://proxy.corp:8080
+          # Cloud workload identity: the ServiceAccount annotation each of EKS
+          # and GKE reads, the pod label plus annotation Azure reads, and all
+          # of them at once. `--set-string` throughout — a role ARN is a string
+          # anyway, but Azure's `use` label is the literal string "true" and a
+          # bare `--set` turns it into a boolean the schema rejects.
+          render --set stackradar.existingSecret=my-secret \
+                 --set-string 'serviceAccount.annotations.eks\.amazonaws\.com/role-arn=arn:aws:iam::123456789012:role/StackRadarScanner'
+          render --set stackradar.existingSecret=my-secret \
+                 --set-string 'serviceAccount.annotations.iam\.gke\.io/gcp-service-account=scanner@example.iam.gserviceaccount.com'
+          render --set stackradar.existingSecret=my-secret \
+                 --set-string 'podLabels.azure\.workload\.identity/use=true' \
+                 --set-string 'podAnnotations.azure\.workload\.identity/client-id=00000000-0000-0000-0000-000000000000'
+          # A ServiceAccount the chart does not create, with no annotations on
+          # it — the combination the guard below must *not* fire on.
+          render --set stackradar.existingSecret=my-secret \
+                 --set serviceAccount.create=false \
+                 --set serviceAccount.name=my-own-sa
           # A released chart: the stamped tag matches appVersion and a digest
           # pins the bytes. Must render — this is what every customer installs.
           render --set stackradar.existingSecret=my-secret \
@@ -250,6 +267,75 @@ jobs:
           fi
           echo "ok: both runtimes are pointed at the bundle, public roots kept"
 
+      # `podLabels` is merged into the pod template's labels, which is also
+      # where the Deployment's `matchLabels` live. `matchLabels` is immutable
+      # after creation, so a podLabels entry that displaced one of them would
+      # install cleanly and fail the *next* upgrade — the worst possible time,
+      # with an error naming the selector rather than the value behind it. The
+      # merge order in `stackradar-scanner.podLabels` is the only thing
+      # preventing that, and nothing else notices if it is reversed.
+      - name: Assert podLabels cannot displace a selector label
+        run: |
+          set -euo pipefail
+
+          out=$(helm template stackradar-scanner helm/ --namespace stackradar \
+                --set stackradar.existingSecret=my-secret \
+                --set-string 'podLabels.app\.kubernetes\.io/name=hijacked' \
+                --set-string 'podLabels.app\.kubernetes\.io/instance=hijacked' \
+                --set-string 'podLabels.app\.kubernetes\.io/component=hijacked' \
+                --set-string 'podLabels.team=platform')
+
+          # Textual, deliberately: a template that emitted the chart's label and
+          # the user's as two lines under the same key would parse as the chart's
+          # value under most YAML readers and still be a manifest with a
+          # duplicate key in it. The displacing value must not reach the render
+          # at all.
+          if printf '%s' "${out}" | grep -q "hijacked"; then
+            echo "::error file=helm/templates/_helpers.tpl::a podLabels entry displaced a selector label." \
+                 "app.kubernetes.io/name, /instance and /component are in the Deployment's matchLabels," \
+                 "which is immutable after creation — this install would succeed and the next upgrade" \
+                 "would fail. The chart's labels must win the merge."
+            printf '%s\n' "${out}" | grep -n -B4 -A4 hijacked
+            exit 1
+          fi
+
+          # The same invariant read structurally rather than by string: whatever
+          # the selector says, the pod template says too.
+          selector=$(printf '%s' "${out}" | yq 'select(.kind == "Deployment") | .spec.selector.matchLabels')
+          labels=$(printf '%s' "${out}" | yq 'select(.kind == "Deployment") | .spec.template.metadata.labels')
+          for key in app.kubernetes.io/name app.kubernetes.io/instance app.kubernetes.io/component; do
+            want=$(printf '%s' "${selector}" | yq ".\"${key}\"")
+            got=$(printf '%s' "${labels}"   | yq ".\"${key}\"")
+            if [ "${got}" != "${want}" ]; then
+              echo "::error file=helm/templates/_helpers.tpl::the pod template's ${key} is '${got}'" \
+                   "but matchLabels says '${want}'; the selector would not match the pod it creates"
+              exit 1
+            fi
+          done
+          echo "ok: podLabels cannot displace a selector label"
+
+          # ...and the value is still worth setting: a label that collides with
+          # nothing has to survive the merge, or Azure Workload Identity never
+          # switches on.
+          if [ "$(printf '%s' "${labels}" | yq '.team')" != "platform" ]; then
+            echo "::error file=helm/templates/_helpers.tpl::a podLabels entry that collides with" \
+                 "nothing was dropped; podLabels would be inert"
+            exit 1
+          fi
+          echo "ok: a non-colliding podLabels entry reaches the pod"
+
+          # Unset renders nothing, same contract as the proxy and CA bundle: an
+          # empty `annotations:` key on the pod template is a diff every
+          # existing install would see for no reason.
+          out=$(helm template stackradar-scanner helm/ --namespace stackradar \
+                --set stackradar.existingSecret=my-secret)
+          if [ "$(printf '%s' "${out}" | yq 'select(.kind == "Deployment") | .spec.template.metadata | has("annotations")')" != "false" ]; then
+            echo "::error file=helm/templates/deployment.yaml::the default render puts an annotations" \
+                 "key on the pod template; unset podAnnotations must render nothing at all"
+            exit 1
+          fi
+          echo "ok: no pod annotations without any configured"
+
       # The guards below only protect users if they actually reject bad input,
       # and a guard that silently stops firing is worse than none. Each case
       # asserts a specific failure, not just "some error happened".
@@ -329,6 +415,27 @@ jobs:
             --set stackradar.existingSecret=my-secret \
             --set caBundle.configMapName=corp-ca \
             --set caBundle.key=
+
+          # Annotations on a ServiceAccount the chart does not create land
+          # nowhere, and workload identity is exactly what they are for — a
+          # silently ignored role ARN is a pod with no cloud credentials and
+          # nothing in the render to say why.
+          refute "serviceAccount.annotations with serviceAccount.create=false" "renders no ServiceAccount" \
+            --set stackradar.existingSecret=my-secret \
+            --set serviceAccount.create=false \
+            --set-string 'serviceAccount.annotations.eks\.amazonaws\.com/role-arn=arn:aws:iam::123456789012:role/StackRadarScanner'
+
+          # Label and annotation values are strings to Kubernetes. `--set` (not
+          # `--set-string`) on Azure's `use: "true"` is the mistake people
+          # actually make, and it has to name the key rather than fail later in
+          # the API server.
+          refute "non-string podLabels value" "podLabels.*string" \
+            --set stackradar.existingSecret=my-secret \
+            --set podLabels.tier=1
+
+          refute "non-string podAnnotations value" "podAnnotations.*string" \
+            --set stackradar.existingSecret=my-secret \
+            --set podAnnotations.replicas=3
 
           # Overriding the tag while a digest is still pinned runs the digest's
           # image under the wrong label. Must be loud.
