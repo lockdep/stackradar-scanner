@@ -1,0 +1,137 @@
+{{- /*
+Rules with no object to live in land nowhere, and the whole point of this value
+is to be a claim a reviewer can check with `kubectl get networkpolicy`. A
+customer who wrote an egress list and left `enabled` at its default would have
+neither the policy nor any sign that the list was ignored. Guard before the
+`if`, so it fires in the case it is about.
+*/ -}}
+{{- if and .Values.networkPolicy.egress (not .Values.networkPolicy.enabled) }}
+{{- fail "networkPolicy.egress is set but networkPolicy.enabled is false, so the chart renders no NetworkPolicy for the rules to land in. Set networkPolicy.enabled=true, or clear networkPolicy.egress." }}
+{{- end }}
+{{- /*
+The policy selects the watcher pod, so it is rendered under the same condition
+the watcher is. `watcher.enabled=false` is the chart's render-nothing mode; a
+policy left behind there would select no pods and enforce nothing.
+*/ -}}
+{{- if and .Values.networkPolicy.enabled .Values.watcher.enabled }}
+{{- /*
+Workload identity hands the pod its cloud credentials through the node's
+link-local metadata endpoint — GKE's metadata server most directly, and the
+IMDS-based fallbacks on the other two. It is reachable over plain HTTP on port
+80 and nowhere else, so the rule is narrow enough to add without weakening
+anything; what it must not be is unconditional, since an install using
+`dockerConfigSecret` or public registries has no business talking to it.
+
+Detection is by the exact keys the three mechanisms document rather than by
+"any annotation is set", so an unrelated annotation on the ServiceAccount does
+not quietly widen the policy. `default dict` on each because a values file that
+writes `podLabels:` with nothing under it hands the template a nil, which
+`merge` refuses — every other template reaches these through `with` and never
+notices.
+*/ -}}
+{{- $identityHints := merge (dict) (.Values.serviceAccount.annotations | default dict) (.Values.podAnnotations | default dict) (.Values.podLabels | default dict) }}
+{{- $workloadIdentity := false }}
+{{- range $key := list "eks.amazonaws.com/role-arn" "iam.gke.io/gcp-service-account" "azure.workload.identity/client-id" "azure.workload.identity/use" }}
+{{- if hasKey $identityHints $key }}
+{{- $workloadIdentity = true }}
+{{- end }}
+{{- end }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "stackradar-scanner.fullname" . }}-watcher
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "stackradar-scanner.labels" . | nindent 4 }}
+    app.kubernetes.io/component: watcher
+spec:
+  {{- /*
+  The same labels the Deployment selects on. A podSelector that drifted from
+  them would leave a policy that looks right in `kubectl get networkpolicy`,
+  selects nothing, and enforces nothing — the failure this object exists to
+  make visible, reintroduced one level up.
+  */}}
+  podSelector:
+    matchLabels:
+      {{- include "stackradar-scanner.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: watcher
+
+  policyTypes:
+    - Ingress
+    - Egress
+
+  {{- /*
+  Nothing dials the agent but the kubelet, and it only asks for /healthz and
+  /readyz. There is no Service, so this is the pod's entire ingress surface.
+
+  No `from`: probe traffic arrives from the node, whose address is not something
+  a podSelector can name and not something the chart can know. Restricting the
+  port rather than the source is the trade that keeps this working on every
+  cluster — a blocked probe is indistinguishable from a dead agent, and the pod
+  restarts in a loop until someone reads the kubelet's events.
+
+  The port is named, not numbered, so `watcher.healthPort` moves both ends at
+  once.
+  */}}
+  ingress:
+    - ports:
+        - port: health
+          protocol: TCP
+
+  {{- if .Values.networkPolicy.egress }}
+  {{- /*
+  A user-supplied list replaces the defaults outright rather than adding to
+  them. Merging would mean a customer who narrowed the 443 rule to their
+  registry CIDRs still had the wide-open one underneath it, which is the
+  opposite of what they asked for.
+  */}}
+  egress:
+    {{- toYaml .Values.networkPolicy.egress | nindent 4 }}
+  {{- else }}
+  egress:
+    # DNS. Every other destination here is a name before it is an address, so
+    # this rule failing looks like every other rule failing at once.
+    #
+    # `kubernetes.io/metadata.name` is set on every namespace by the API server
+    # from 1.22 on, and the chart requires 1.24 — so this matches without the
+    # customer having to label kube-system themselves. A cluster running
+    # NodeLocal DNSCache is the exception worth knowing about: its resolver
+    # answers on a link-local node address rather than from a pod, and this
+    # rule does not cover it.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+
+    # The StackRadar API, your registries, and the Kubernetes API server, to any
+    # address. 6443 as well as 443 because the in-cluster API endpoint is a
+    # ClusterIP on 443 that most CNIs evaluate after DNAT, by which point the
+    # destination is a node on 6443 — allowing only 443 produces a policy that
+    # passes review and breaks the agent's connection to the API server.
+    #
+    # `to` is omitted deliberately: the chart cannot know where your registries
+    # are. Narrowing this rule to CIDRs you do know is the single most useful
+    # edit to make to it.
+    - ports:
+        - port: 443
+          protocol: TCP
+        - port: 6443
+          protocol: TCP
+    {{- if $workloadIdentity }}
+
+    # The cloud metadata endpoint, because a workload identity annotation or
+    # label above says the pod's registry credentials are minted through it.
+    - to:
+        - ipBlock:
+            cidr: 169.254.169.254/32
+      ports:
+        - port: 80
+          protocol: TCP
+    {{- end }}
+  {{- end }}
+{{- end }}

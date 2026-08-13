@@ -20,6 +20,25 @@ Removed, Fixed, Security — so use those six and nothing else.
 
 ### Added
 
+- `networkPolicy.enabled` and `networkPolicy.egress` — a NetworkPolicy for the
+  scanner pod, so what the agent can reach is an object you can read with
+  `kubectl get networkpolicy` rather than a paragraph in our README. Ingress is
+  the kubelet's health probes and nothing else; egress defaults to DNS, the
+  Kubernetes API server, and TCP 443 for the StackRadar API and your registries,
+  plus the cloud metadata endpoint where workload identity is configured.
+
+  Off by default, and deliberately so: a registry that sits outside the default
+  rules stops being scanned, which is exactly the quiet failure the rest of this
+  agent is built to avoid. Turn it on when you have somewhere to test it, and
+  narrow it with `networkPolicy.egress` — a list you set replaces the defaults
+  rather than adding to them, so include a DNS rule of your own. Behind a proxy
+  the whole policy collapses to DNS plus the proxy's address.
+
+  A CNI that does not enforce NetworkPolicy accepts the object and ignores it.
+  See [Restricting the agent's network](helm/README.md#restricting-the-agents-network),
+  which leads with how to tell the policy apart from a credentials problem when
+  pulls start failing.
+
 - `scanner.excludeImages` — a comma-separated list of glob patterns for images
   you never want scanned, whatever namespace they run in. Namespace filtering
   was the only tool for this, and it is the wrong shape for the images people

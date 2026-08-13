@@ -122,6 +122,23 @@ caBundle:
   # mounted, so unrelated keys in the same object are not exposed to the pod.
   key: "ca-certificates.crt"
 
+networkPolicy:
+  # -- Create a NetworkPolicy for the scanner pod. Ingress is denied except the
+  # health port the kubelet probes on; egress is allowed to the destinations in
+  # `networkPolicy.egress`. Requires a CNI that enforces NetworkPolicy — with
+  # one that does not, the object is inert rather than a false sense of safety,
+  # so confirm yours enforces policy before treating this as a control.
+  enabled: false
+
+  # -- Egress rules, written in the API's own `spec.egress` shape. Left empty,
+  # the chart renders defaults covering DNS, the Kubernetes API server, and TCP
+  # 443 to any address — the StackRadar API and your registries. A list set here
+  # replaces those defaults entirely rather than adding to them: narrow the 443
+  # rule to the CIDRs your registries live in if you know them, and keep a DNS
+  # rule of your own or nothing resolves. Behind a proxy this collapses to DNS
+  # plus the proxy's address, which is a far tighter policy than the default.
+  egress: []
+
 # -- Name of a `kubernetes.io/dockerconfigjson` Secret to mount as a docker config,
 # allowing syft to pull from private registries.
 # Create with: `kubectl create secret generic registry-credentials --from-file=.dockerconfigjson=...`

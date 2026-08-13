@@ -169,6 +169,16 @@ pod watch established, when did the last heartbeat succeed) rather than
 anything about your workloads. If you run default-deny NetworkPolicies, allow
 the kubelet in on that port or the probes fail and the pod restarts in a loop.
 
+`networkPolicy.enabled=true` writes that policy for you: ingress limited to the
+health port, egress to DNS, the Kubernetes API server and TCP 443 — the list
+above, as an object you can read back with `kubectl get networkpolicy` instead
+of taking this section's word for it. It is off by default, because a registry
+outside the default rules stops being scanned and that is the silent failure
+this agent works hardest to avoid; the rules are yours to narrow via
+`networkPolicy.egress`. Note that a CNI which does not enforce NetworkPolicy
+ignores the object entirely. See
+[Restricting the agent's network](helm/README.md#restricting-the-agents-network).
+
 Where that egress goes through a corporate proxy, set `proxy.httpsProxy` (see
 [Behind a corporate proxy](helm/README.md#behind-a-corporate-proxy)). Kubernetes
 API traffic is exempted from the proxy automatically and stays in the cluster.

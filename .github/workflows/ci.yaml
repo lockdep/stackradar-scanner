@@ -188,6 +188,21 @@ jobs:
           render --set stackradar.existingSecret=my-secret \
                  --set serviceAccount.create=false \
                  --set serviceAccount.name=my-own-sa
+          # NetworkPolicy: the defaults, a list of the customer's own replacing
+          # them, and the workload identity case that adds the metadata
+          # endpoint rule. `watcher.enabled=false` renders no pod, so it must
+          # render no policy either.
+          render --set stackradar.existingSecret=my-secret \
+                 --set networkPolicy.enabled=true
+          render --set stackradar.existingSecret=my-secret \
+                 --set networkPolicy.enabled=true \
+                 --set 'networkPolicy.egress[0].to[0].ipBlock.cidr=10.0.0.0/8' \
+                 --set 'networkPolicy.egress[0].ports[0].port=443'
+          render --set stackradar.existingSecret=my-secret \
+                 --set networkPolicy.enabled=true \
+                 --set-string 'serviceAccount.annotations.eks\.amazonaws\.com/role-arn=arn:aws:iam::123456789012:role/StackRadarScanner'
+          render --set stackradar.existingSecret=my-secret \
+                 --set networkPolicy.enabled=true --set watcher.enabled=false
           # A released chart: the stamped tag matches appVersion and a digest
           # pins the bytes. Must render — this is what every customer installs.
           render --set stackradar.existingSecret=my-secret \
@@ -409,6 +424,127 @@ jobs:
           fi
           echo "ok: no pod annotations without any configured"
 
+      # A NetworkPolicy is a claim about the pod's network surface that a
+      # reviewer checks with `kubectl get networkpolicy`, so the ways it can be
+      # wrong are all quiet ones: a podSelector that matches nothing enforces
+      # nothing, an ingress rule that misses the health port restarts the pod in
+      # a loop, and a missing DNS rule stops every scan. None of them fail a
+      # render.
+      - name: Assert the NetworkPolicy polices the pod it names
+        run: |
+          set -euo pipefail
+
+          out=$(helm template stackradar-scanner helm/ --namespace stackradar \
+                --set stackradar.existingSecret=my-secret)
+          if printf '%s' "${out}" | grep -q "kind: NetworkPolicy"; then
+            echo "::error file=helm/templates/networkpolicy.yaml::the default render contains a" \
+                 "NetworkPolicy; networkPolicy.enabled defaults to false and must render nothing"
+            exit 1
+          fi
+          echo "ok: no NetworkPolicy unless asked for"
+
+          out=$(helm template stackradar-scanner helm/ --namespace stackradar \
+                --set stackradar.existingSecret=my-secret \
+                --set networkPolicy.enabled=true)
+          policy=$(printf '%s' "${out}" | yq 'select(.kind == "NetworkPolicy")')
+          labels=$(printf '%s' "${out}" | yq 'select(.kind == "Deployment") | .spec.template.metadata.labels')
+
+          # The invariant that makes the object worth anything: every label the
+          # policy selects on is a label the pod actually carries. A drift here
+          # leaves a policy that reads correctly and selects no pods.
+          for key in app.kubernetes.io/name app.kubernetes.io/instance app.kubernetes.io/component; do
+            want=$(printf '%s' "${policy}" | yq ".spec.podSelector.matchLabels.\"${key}\"")
+            got=$(printf '%s' "${labels}"  | yq ".\"${key}\"")
+            if [ "${want}" = "null" ] || [ "${want}" != "${got}" ]; then
+              echo "::error file=helm/templates/networkpolicy.yaml::the policy selects ${key}='${want}'" \
+                   "but the pod carries '${got}'; the policy would select no pods and enforce nothing"
+              exit 1
+            fi
+          done
+          echo "ok: the policy selects the watcher pod"
+
+          for type in Ingress Egress; do
+            if [ "$(printf '%s' "${policy}" | yq "[.spec.policyTypes[] == \"${type}\"] | any")" != "true" ]; then
+              echo "::error file=helm/templates/networkpolicy.yaml::policyTypes omits ${type};" \
+                   "a type left out of the list is not restricted at all"
+              exit 1
+            fi
+          done
+          echo "ok: both directions are policed"
+
+          # The kubelet's probes are the pod's only ingress, and they are
+          # allowed by port name so watcher.healthPort moves both ends at once.
+          # A numeric port here, or no ingress rule at all, is a pod that fails
+          # its own liveness probe and restarts forever.
+          if [ "$(printf '%s' "${policy}" | yq '.spec.ingress | length')" != "1" ] ||
+             [ "$(printf '%s' "${policy}" | yq '.spec.ingress[0].ports[0].port')" != "health" ]; then
+            echo "::error file=helm/templates/networkpolicy.yaml::ingress does not allow exactly the" \
+                 "named 'health' port. A blocked probe is indistinguishable from a dead agent:" \
+                 "the kubelet restarts the pod in a loop."
+            exit 1
+          fi
+          echo "ok: the health probes are let in, by name"
+
+          # DNS and 443 are what every install needs; 6443 is what the
+          # in-cluster API endpoint turns into after DNAT on most CNIs.
+          for port in 53 443 6443; do
+            if [ "$(printf '%s' "${policy}" | yq "[.spec.egress[].ports[].port == ${port}] | any")" != "true" ]; then
+              echo "::error file=helm/templates/networkpolicy.yaml::the default egress rules do not" \
+                   "allow port ${port}; the agent would lose DNS, its uploads, or the API server"
+              exit 1
+            fi
+          done
+          echo "ok: the default egress covers DNS, HTTPS and the API server"
+
+          # The metadata endpoint is where workload identity mints the pod's
+          # registry credentials — and it is a link-local address no install
+          # without workload identity has any reason to reach.
+          if printf '%s' "${policy}" | grep -q "169.254.169.254"; then
+            echo "::error file=helm/templates/networkpolicy.yaml::the default policy allows egress to" \
+                 "the cloud metadata endpoint; it belongs only in the workload identity case"
+            exit 1
+          fi
+          out=$(helm template stackradar-scanner helm/ --namespace stackradar \
+                --set stackradar.existingSecret=my-secret \
+                --set networkPolicy.enabled=true \
+                --set-string 'serviceAccount.annotations.iam\.gke\.io/gcp-service-account=scanner@example.iam.gserviceaccount.com')
+          if ! printf '%s' "${out}" | grep -q "169.254.169.254/32"; then
+            echo "::error file=helm/templates/networkpolicy.yaml::workload identity is configured but the" \
+                 "policy does not allow the metadata endpoint; the token exchange goes through it," \
+                 "so registry pulls would fail with a policy that looks correct"
+            exit 1
+          fi
+          echo "ok: the metadata endpoint is allowed only where it is used"
+
+          # A customer's own list replaces the defaults rather than adding to
+          # them: narrowing the 443 rule is pointless if the wide-open one is
+          # still underneath it.
+          out=$(helm template stackradar-scanner helm/ --namespace stackradar \
+                --set stackradar.existingSecret=my-secret \
+                --set networkPolicy.enabled=true \
+                --set 'networkPolicy.egress[0].to[0].ipBlock.cidr=10.0.0.0/8' \
+                --set 'networkPolicy.egress[0].ports[0].port=443')
+          policy=$(printf '%s' "${out}" | yq 'select(.kind == "NetworkPolicy")')
+          if [ "$(printf '%s' "${policy}" | yq '.spec.egress | length')" != "1" ]; then
+            echo "::error file=helm/templates/networkpolicy.yaml::a user-supplied egress list was merged" \
+                 "with the defaults instead of replacing them; a narrowed rule would sit under a" \
+                 "wide-open one and change nothing"
+            exit 1
+          fi
+          echo "ok: a supplied egress list replaces the defaults"
+
+          # No pod, no policy. The chart's render-nothing mode has to stay
+          # render-nothing.
+          out=$(helm template stackradar-scanner helm/ --namespace stackradar \
+                --set stackradar.existingSecret=my-secret \
+                --set networkPolicy.enabled=true --set watcher.enabled=false)
+          if printf '%s' "${out}" | grep -q "kind: NetworkPolicy"; then
+            echo "::error file=helm/templates/networkpolicy.yaml::watcher.enabled=false renders no pod" \
+                 "but still renders a policy, which would select nothing"
+            exit 1
+          fi
+          echo "ok: no policy without a pod to police"
+
       # The guards below only protect users if they actually reject bad input,
       # and a guard that silently stops firing is worse than none. Each case
       # asserts a specific failure, not just "some error happened".
@@ -530,6 +666,19 @@ jobs:
           refute "watcher.healthPort of 0" "healthPort.*[Dd]oes not match pattern" \
             --set stackradar.existingSecret=my-secret \
             --set-string watcher.healthPort=0
+
+          # Egress rules with the policy switched off land nowhere, and the
+          # whole value of the object is that it is checkable — a list that
+          # silently did not render is the opposite of that.
+          refute "networkPolicy.egress with networkPolicy.enabled=false" "renders no NetworkPolicy" \
+            --set stackradar.existingSecret=my-secret \
+            --set 'networkPolicy.egress[0].ports[0].port=443'
+
+          # The rules are a list of NetworkPolicy egress entries. A scalar here
+          # renders a policy the API server rejects, far from the mistake.
+          refute "non-list networkPolicy.egress" "networkPolicy.egress.*array" \
+            --set stackradar.existingSecret=my-secret \
+            --set networkPolicy.egress=443
 
           # Overriding the tag while a digest is still pinned runs the digest's
           # image under the wrong label. Must be loud.

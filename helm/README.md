@@ -316,7 +316,128 @@ kubectl exec -n stackradar deploy/stackradar-scanner-watcher -- \
 
 **If you run default-deny NetworkPolicies**, allow ingress to the `health` port
 from the kubelet. A blocked probe is indistinguishable from a dead agent, and
-the pod will restart in a loop.
+the pod will restart in a loop. `networkPolicy.enabled=true` writes a policy
+that already does this — see the next section.
+
+## Restricting the agent's network
+
+`networkPolicy.enabled=true` renders a NetworkPolicy for the scanner pod: no
+ingress but the kubelet's health probes, and egress only to DNS, the Kubernetes
+API server, and TCP 443. It is off by default, so nothing changes until you ask
+for it.
+
+The point is less about blocking traffic than about being checkable. What the
+agent talks to is described in prose in the [repository
+README](https://github.com/lockdep/stackradar-scanner#what-leaves-your-cluster);
+this turns that description into an object you can read with
+`kubectl get networkpolicy -n stackradar -o yaml` and hold us to.
+
+### If images stopped being scanned after you enabled it
+
+That is the failure to expect, and it is almost always a registry the egress
+rules do not cover — an internal registry on a port other than 443, a pull
+through a proxy, or a resolver the DNS rule misses. The agent keeps running and
+keeps heartbeating; only the pulls fail.
+
+Confirm it is the policy before changing anything else:
+
+```bash
+# What syft actually failed on. Look for connection timeouts rather than 401s —
+# a timeout is a policy, a 401 is a credential.
+kubectl logs -n stackradar deploy/stackradar-scanner-watcher | grep -i "scan failed"
+
+# Then take the policy away for a minute. If the pulls recover, it was the policy.
+helm upgrade stackradar-scanner oci://ghcr.io/lockdep/charts/stackradar-scanner \
+  --version <version> \
+  --namespace stackradar --reuse-values \
+  --set networkPolicy.enabled=false
+```
+
+Then put it back with a rule that covers what was missing, using
+`networkPolicy.egress` below. Your CNI can usually tell you what it dropped —
+`cilium monitor --type drop` on Cilium, or the flow logs your provider exposes.
+
+### A CNI that does not enforce NetworkPolicy ignores this object
+
+The API server accepts a NetworkPolicy whatever your networking is, and
+`kubectl get networkpolicy` will show it either way. Plain flannel enforces
+nothing; several managed offerings enforce nothing unless network policy was
+switched on when the cluster was created. On such a cluster this object is
+inert — not a weaker control, no control at all. Confirm your CNI enforces
+policy before counting this as one.
+
+### What the default rules allow
+
+Egress, when you leave `networkPolicy.egress` empty:
+
+| Destination | Ports | Why |
+|---|---|---|
+| Pods in `kube-system` | 53/UDP, 53/TCP | DNS. Everything else here is a name first. |
+| Anywhere | 443/TCP, 6443/TCP | The StackRadar API, your registries, and the Kubernetes API server. |
+| `169.254.169.254/32` | 80/TCP | Only when workload identity is configured — the token exchange goes through the metadata endpoint. |
+
+Ingress is the `health` port and nothing else, allowed from any source rather
+than from the node: probe traffic comes from the kubelet, whose address is not
+something a pod selector can name and not something the chart can know. The
+endpoint serves the agent's own state to whoever asks, and no Service points at
+it.
+
+Two things the defaults do not cover:
+
+- **NodeLocal DNSCache.** Its resolver answers on a link-local address on the
+  node, not from a pod in `kube-system`, so the DNS rule above misses it. Add an
+  `ipBlock` for `169.254.20.10/32` on port 53 if you run it.
+- **A registry on a port other than 443**, including a plain-HTTP internal one.
+
+### Narrowing it
+
+`networkPolicy.egress` takes rules in the API's own `spec.egress` shape and
+**replaces** the defaults entirely — merging would leave the wide-open 443 rule
+sitting under whatever you narrowed it to. So include DNS in your own list, or
+nothing resolves:
+
+```yaml
+networkPolicy:
+  enabled: true
+  egress:
+    # DNS.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    # The Kubernetes API server, on the CIDR your control plane lives in.
+    - to:
+        - ipBlock:
+            cidr: 10.0.0.0/16
+      ports:
+        - port: 443
+          protocol: TCP
+        - port: 6443
+          protocol: TCP
+    # api.stackradar.io and your registries, narrowed to addresses you know.
+    - to:
+        - ipBlock:
+            cidr: 203.0.113.0/24
+      ports:
+        - port: 443
+          protocol: TCP
+```
+
+Note the `6443`. The in-cluster API endpoint is a ClusterIP on 443, but most
+CNIs evaluate policy after DNAT — by which point the destination is a node on
+6443. A rule that allows only 443 reads correctly and cuts the agent off from
+the API server, which is why the default allows both.
+
+**Behind a proxy this gets much tighter.** With `proxy.httpsProxy` set, the only
+addresses the agent reaches are DNS, the Kubernetes API server, and the proxy —
+so an egress list of those three is both the smallest and the most accurate
+policy you can write here. Registries and the StackRadar API drop out of it
+entirely.
 
 ## Verifying the release
 
@@ -401,6 +522,8 @@ See [RELEASING.md](https://github.com/lockdep/stackradar-scanner/blob/main/RELEA
 | image.tag | string | `""` | Image tag. Defaults to the chart appVersion, which for a released chart is the release version — leave empty so the chart and the image it deploys stay in lockstep. |
 | imagePullSecrets | list | `[]` | List of image pull secrets for the scanner pod. |
 | nameOverride | string | `""` | Override the chart name used in resource names and labels. |
+| networkPolicy.egress | list | `[]` | Egress rules, written in the API's own `spec.egress` shape. Left empty, the chart renders defaults covering DNS, the Kubernetes API server, and TCP 443 to any address — the StackRadar API and your registries. A list set here replaces those defaults entirely rather than adding to them: narrow the 443 rule to the CIDRs your registries live in if you know them, and keep a DNS rule of your own or nothing resolves. Behind a proxy this collapses to DNS plus the proxy's address, which is a far tighter policy than the default. |
+| networkPolicy.enabled | bool | `false` | Create a NetworkPolicy for the scanner pod. Ingress is denied except the health port the kubelet probes on; egress is allowed to the destinations in `networkPolicy.egress`. Requires a CNI that enforces NetworkPolicy — with one that does not, the object is inert rather than a false sense of safety, so confirm yours enforces policy before treating this as a control. |
 | nodeSelector | object | `{}` | Node selector for pod scheduling. |
 | podAnnotations | object | `{}` | Extra annotations for the scanner pod, e.g. the client ID Azure Workload Identity reads (`azure.workload.identity/client-id`). |
 | podLabels | object | `{}` | Extra labels for the scanner pod. Azure Workload Identity is switched on here, with `azure.workload.identity/use: "true"`. The chart's own labels win on a collision: `app.kubernetes.io/name`, `app.kubernetes.io/instance` and `app.kubernetes.io/component` are part of the Deployment's selector and are immutable after creation, so a value that displaced one would break the next `helm upgrade` rather than this install. |

@@ -70,6 +70,17 @@
         "key":           { "type": "string" }
       }
     },
+    "networkPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+
+      "$comment": "`egress` stays an open array for the same reason as tolerations and affinity: its entries are NetworkPolicy's own `spec.egress` shape, which is the API's to validate rather than this chart's. What is worth catching here is a scalar where a list belongs — `--set networkPolicy.egress=443` renders a policy the API server rejects, far from the mistake.",
+
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "egress":  { "type": "array" }
+      }
+    },
     "dockerConfigSecret": { "type": "string" },
     "image": {
       "type": "object",
