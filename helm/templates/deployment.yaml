@@ -122,6 +122,16 @@ spec:
             {{- toYaml .Values.securityContext | nindent 12 }}
           command: ["node", "dist/src/watch.js"]
 
+          {{- /*
+          Named, not just numbered, so a NetworkPolicy can allow the kubelet in
+          by name and stay correct if the port ever moves. No Service points at
+          it — the probes are the only client.
+          */}}
+          ports:
+            - name: health
+              containerPort: {{ .Values.watcher.healthPort | int }}
+              protocol: TCP
+
           env:
             - name: NODE_OPTIONS
               value: "--max-old-space-size=256"
@@ -153,6 +163,8 @@ spec:
               value: {{ .Values.watcher.concurrentScans | quote }}
             - name: SWEEP_INTERVAL_MS
               value: {{ .Values.watcher.sweepIntervalMs | quote }}
+            - name: HEALTH_PORT
+              value: {{ .Values.watcher.healthPort | quote }}
             - name: SKIP_EXISTING_DIGESTS
               value: {{ .Values.scanner.skipExistingDigests | quote }}
             - name: RESOLVE_IMAGE_PULL_SECRETS
@@ -222,9 +234,45 @@ spec:
           resources:
             {{- toYaml .Values.watcher.resources | nindent 12 }}
 
+          {{- /*
+          The probe this replaced ran `node -e process.exit(0)`, which spawned a
+          second Node process and proved only that the image contains a Node
+          binary. It could not fail while the node had memory, so the failure it
+          needed to catch — an informer that errors, fails to restart, and
+          leaves the process alive, Ready and watching nothing — was invisible
+          from outside the pod.
+
+          /healthz reports the informer's actual state: non-2xx once it has been
+          down for longer than three restart attempts, or after five consecutive
+          heartbeat failures. Event recency is deliberately not part of it, or a
+          cluster quiet overnight would restart itself.
+
+          failureThreshold 3 over a 60s period means a fault has to persist for
+          three minutes before the kubelet acts. An API server rolling, or a
+          30-second network blip, resolves well inside that.
+          */}}
           livenessProbe:
-            exec:
-              command: ["node", "-e", "process.exit(0)"]
+            httpGet:
+              path: /healthz
+              port: health
             initialDelaySeconds: 30
             periodSeconds: 60
+            timeoutSeconds: 5
+            failureThreshold: 3
+
+          {{- /*
+          Readiness answers a narrower question: has the first informer sync
+          finished. A large cluster's initial list takes a while, and until it
+          returns the agent has not seen the pods it is there to scan — so the
+          Deployment should not report the rollout complete. It stays ready
+          afterwards; an informer that dies later is liveness' problem.
+          */}}
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
 {{- end }}

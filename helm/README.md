@@ -232,6 +232,42 @@ Kubernetes will not let you change after the Deployment exists. An entry that
 displaced one would install cleanly and break your next upgrade, so it is
 dropped instead.
 
+## Health probes
+
+The watcher answers a liveness probe on `/healthz` and a readiness probe on
+`/readyz`, over HTTP on port `8081` — named `health`, and moved with
+`watcher.healthPort` if something else in the pod's network namespace wants that
+number. There is no Service: the kubelet reaches the port on the pod IP, and
+nothing else should.
+
+`/healthz` reports what the agent is actually doing. It goes non-2xx when the
+watch on the Kubernetes API has been down for three failed restart attempts, or
+after five consecutive heartbeat failures, and the kubelet restarts the pod
+after three failures a minute apart — so a fault has to persist for around
+three minutes before anything happens, which a rolling API server or a
+half-minute network blip does not.
+
+A quiet cluster is not a fault. Event recency is deliberately not part of the
+signal, so a cluster whose workloads have not changed all night stays healthy.
+
+`/readyz` reports not-ready until the informer's first sync completes. In a
+large cluster that initial list takes a while, and until it returns the agent
+has not seen the pods it is there to scan — so `helm upgrade --wait` and
+`kubectl rollout status` wait for it rather than reporting a rollout that has
+not finished.
+
+Both endpoints return the agent's state as JSON, which is worth reading when a
+pod is restarting and you want to know why:
+
+```bash
+kubectl exec -n stackradar deploy/stackradar-scanner-watcher -- \
+  wget -qO- http://127.0.0.1:8081/healthz
+```
+
+**If you run default-deny NetworkPolicies**, allow ingress to the `health` port
+from the kubelet. A blocked probe is indistinguishable from a dead agent, and
+the pod will restart in a loop.
+
 ## Verifying the release
 
 The chart and the image it deploys are signed with [cosign](https://docs.sigstore.dev/)
@@ -342,5 +378,6 @@ See [RELEASING.md](https://github.com/lockdep/stackradar-scanner/blob/main/RELEA
 | tolerations | list | `[]` | Tolerations for pod scheduling on tainted nodes. |
 | watcher.concurrentScans | string | `"1"` | Maximum number of concurrent syft scans. Each invocation can use 300–600 MiB for large images; keeping this at 1 avoids OOM kills. |
 | watcher.enabled | bool | `true` | Enable the event-driven watcher with periodic sweeps. |
+| watcher.healthPort | string | `"8081"` | Port for the agent's liveness and readiness endpoints. Not exposed by a Service — the kubelet reaches it on the pod IP and nothing else does. Change it only if something else in the pod's network namespace already listens here. Must be 1024 or above: the container drops every Linux capability, so it cannot bind a privileged port. |
 | watcher.resources | object | `{"limits":{"cpu":"2000m","memory":"1Gi"},"requests":{"cpu":"50m","memory":"512Mi"}}` | Resource requests and limits for the watcher Deployment. |
 | watcher.sweepIntervalMs | string | `"21600000"` | How often to run a full pod sweep in milliseconds. Set to 0 to disable periodic sweeps and rely solely on the informer. |

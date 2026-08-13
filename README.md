@@ -23,6 +23,7 @@ A single `watcher` Deployment runs three loops:
 | Informer | real time | Watches pod add/update events and scans images as they appear |
 | Sweep | every 6 h | Full pod list, to catch anything the informer missed |
 | Heartbeat | every 5 min | Reports liveness and the running agent version |
+| Health endpoints | on request | Answers the kubelet's liveness and readiness probes on port 8081 |
 
 For each container image it finds, the agent asks StackRadar whether that image
 digest has already been indexed. If not, it pulls the image **directly from the
@@ -153,6 +154,14 @@ Non-root (uid 65534), read-only root filesystem, all Linux capabilities dropped,
 no privilege escalation, `/tmp` on an `emptyDir`. The pod needs egress to your
 StackRadar endpoint, to the Kubernetes API, and to whichever registries host
 your images.
+
+It listens on one port — `8081`, named `health`, configurable via
+`watcher.healthPort` — serving `/healthz` and `/readyz` to the kubelet and
+nothing else. No Service points at it, so it is reachable only from inside the
+cluster on the pod IP, and the responses carry the agent's own state (is the
+pod watch established, when did the last heartbeat succeed) rather than
+anything about your workloads. If you run default-deny NetworkPolicies, allow
+the kubelet in on that port or the probes fail and the pod restarts in a loop.
 
 Where that egress goes through a corporate proxy, set `proxy.httpsProxy` (see
 [Behind a corporate proxy](helm/README.md#behind-a-corporate-proxy)). Kubernetes

@@ -122,6 +122,11 @@ jobs:
           render --set stackradar.existingSecret=my-secret --set dockerConfigSecret=regcred
           render --set stackradar.existingSecret=my-secret --set scanner.includeNamespaces=default
           render --set stackradar.existingSecret=my-secret --set watcher.enabled=false
+          # The health endpoints moved off their default port. `--set-string`
+          # again: a bare `=9090` reaches the schema as a number and is
+          # rejected, same as every other watcher value.
+          render --set stackradar.existingSecret=my-secret \
+                 --set-string watcher.healthPort=9090
           # The three states of the `secrets get` rule: cluster-wide (the
           # default, covered by every case above), narrowed to named Secrets
           # via resourceNames, and absent. `--set-string` because
@@ -266,6 +271,70 @@ jobs:
             exit 1
           fi
           echo "ok: both runtimes are pointed at the bundle, public roots kept"
+
+      # The probe this replaced ran `node -e process.exit(0)` — a second Node
+      # process that exits 0 whatever the watcher is doing, and so a probe that
+      # could not fail. The new one asks the running process, over the port that
+      # process was told to bind, which means three things have to agree:
+      # the container port, the HEALTH_PORT env var, and what the probes name.
+      # Nothing else in the repo notices when one of them moves, and the symptom
+      # of a disagreement is a pod that restarts forever while being perfectly
+      # healthy.
+      - name: Assert the health probes reach the port the agent binds
+        run: |
+          set -euo pipefail
+
+          # $1 = the port the render should agree on, rest = extra helm args.
+          check_probes() {
+            local port="$1"; shift
+            local out container path
+
+            out=$(helm template stackradar-scanner helm/ --namespace stackradar \
+                  --set stackradar.existingSecret=my-secret "$@")
+            container=$(printf '%s' "${out}" | yq 'select(.kind == "Deployment") | .spec.template.spec.containers[0]')
+
+            for probe in livenessProbe readinessProbe; do
+              case "${probe}" in
+                livenessProbe)  path="/healthz" ;;
+                readinessProbe) path="/readyz"  ;;
+              esac
+
+              if [ "$(printf '%s' "${container}" | yq ".${probe} | has(\"exec\")")" = "true" ]; then
+                echo "::error file=helm/templates/deployment.yaml::${probe} is an exec probe." \
+                     "An exec probe runs beside the watcher instead of asking it anything," \
+                     "which is the failure this change removed: it cannot report an informer" \
+                     "that has stopped watching."
+                exit 1
+              fi
+
+              if [ "$(printf '%s' "${container}" | yq ".${probe}.httpGet.port")" != "health" ]; then
+                echo "::error file=helm/templates/deployment.yaml::${probe} does not target the" \
+                     "named 'health' port; a numeric port here drifts from the container port the" \
+                     "moment watcher.healthPort is overridden"
+                exit 1
+              fi
+
+              if [ "$(printf '%s' "${container}" | yq ".${probe}.httpGet.path")" != "${path}" ]; then
+                echo "::error file=helm/templates/deployment.yaml::${probe} does not request ${path}." \
+                     "The agent serves liveness on /healthz and readiness on /readyz and 404s" \
+                     "everything else, so a wrong path fails every probe."
+                exit 1
+              fi
+            done
+
+            declared=$(printf '%s' "${container}" | yq '.ports[] | select(.name == "health") | .containerPort')
+            passed=$(printf '%s' "${container}" | yq '.env[] | select(.name == "HEALTH_PORT") | .value')
+            if [ "${declared}" != "${port}" ] || [ "${passed}" != "${port}" ]; then
+              echo "::error file=helm/templates/deployment.yaml::the container port (${declared})," \
+                   "HEALTH_PORT (${passed}) and watcher.healthPort (${port}) disagree." \
+                   "The kubelet would probe a port the agent is not listening on."
+              exit 1
+            fi
+          }
+
+          check_probes 8081
+          check_probes 9090 --set-string watcher.healthPort=9090
+          echo "ok: both probes ask the agent, on the port it binds"
 
       # `podLabels` is merged into the pod template's labels, which is also
       # where the Deployment's `matchLabels` live. `matchLabels` is immutable
@@ -436,6 +505,20 @@ jobs:
           refute "non-string podAnnotations value" "podAnnotations.*string" \
             --set stackradar.existingSecret=my-secret \
             --set podAnnotations.replicas=3
+
+          # A health port the pod cannot bind is a pod that fails its own
+          # liveness probe and restarts forever — diagnosed as "the probe is
+          # broken" rather than as the typo it is. Both ends of the range are
+          # real mistakes: 0 has the kernel pick a port the probes do not know,
+          # and anything under 1024 cannot be bound by a container that drops
+          # every capability.
+          refute "privileged watcher.healthPort" "healthPort.*[Dd]oes not match pattern" \
+            --set stackradar.existingSecret=my-secret \
+            --set-string watcher.healthPort=80
+
+          refute "watcher.healthPort of 0" "healthPort.*[Dd]oes not match pattern" \
+            --set stackradar.existingSecret=my-secret \
+            --set-string watcher.healthPort=0
 
           # Overriding the tag while a digest is still pinned runs the digest's
           # image under the wrong label. Must be loud.

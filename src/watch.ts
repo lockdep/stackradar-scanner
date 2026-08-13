@@ -22,6 +22,15 @@ import {
 } from "./lib/scan.js";
 import { heartbeat, checkExistingSbom, uploadSBOM } from "./lib/client.js";
 import { configureProxy } from "./lib/proxy.js";
+import {
+    HEALTH_PORT,
+    INFORMER_RESTART_DELAY_MS,
+    startHealthServer,
+    beginInformerStart,
+    markInformerUp,
+    markInformerDown,
+    recordInformerEvent,
+} from "./lib/health.js";
 import { log } from "./lib/logger.js";
 import { parseImageRef } from "./parse-image-ref.js";
 
@@ -170,6 +179,25 @@ async function scanImage(info: ImageInfo, coreApi: k8s.CoreV1Api): Promise<void>
     }
 }
 
+// ─── Informer ────────────────────────────────────────────────────────────────
+
+/**
+ * Starts (or restarts) the informer and records whether it is watching.
+ *
+ * Not a bare `informer.start()`: the call resolves even when the initial list
+ * fails, because the informer reports that by emitting 'error' rather than by
+ * rejecting. `beginInformerStart` / `markInformerUp` bracket the attempt so an
+ * error arriving in between is not mistaken for a recovery — otherwise every
+ * failed restart would look like a healthy one. See `lib/health.ts`.
+ */
+async function startInformer(informer: k8s.Informer<k8s.V1Pod>): Promise<void> {
+    const attempt = beginInformerStart();
+    await informer.start();
+    if (markInformerUp(attempt)) {
+        log.info("watching for pod changes across all namespaces");
+    }
+}
+
 // ─── Main ────────────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
@@ -182,11 +210,18 @@ async function main(): Promise<void> {
         skipExistingDigests: SKIP_EXISTING_DIGESTS,
         resolveImagePullSecrets: RESOLVE_IMAGE_PULL_SECRETS,
         sweepIntervalMs: SWEEP_INTERVAL_MS || "disabled",
+        healthPort: HEALTH_PORT,
     }, "StackRadar cluster watcher starting");
 
     // Before the first heartbeat: in a cluster with no direct egress, every
     // request below this line has to go through the proxy or fail.
     configureProxy();
+
+    // Before anything that can be slow. The kubelet starts probing on its own
+    // schedule, and an initial sync that takes a minute in a large cluster
+    // must answer "not ready yet" rather than "connection refused" — the
+    // latter is indistinguishable from a crash loop.
+    await startHealthServer();
 
     const kc = loadKubeConfig();
     const coreApi = kc.makeApiClient(k8s.CoreV1Api);
@@ -200,28 +235,33 @@ async function main(): Promise<void> {
     );
 
     informer.on("add", (pod: k8s.V1Pod) => {
+        recordInformerEvent();
         handlePod(pod, coreApi).catch((err) =>
             log.error({ err: err instanceof Error ? err.message : String(err) }, "error handling pod add")
         );
     });
 
     informer.on("update", (pod: k8s.V1Pod) => {
+        recordInformerEvent();
         handlePod(pod, coreApi).catch((err) =>
             log.error({ err: err instanceof Error ? err.message : String(err) }, "error handling pod update")
         );
     });
 
     informer.on("error", (err: Error) => {
-        log.error({ err: err.message }, "informer error, restarting in 5s");
+        markInformerDown();
+        log.error(
+            { err: err.message, restartInMs: INFORMER_RESTART_DELAY_MS },
+            "informer error, restarting"
+        );
         setTimeout(() => {
-            informer.start().catch((e) =>
+            startInformer(informer).catch((e) =>
                 log.error({ err: e instanceof Error ? e.message : String(e) }, "failed to restart informer")
             );
-        }, 5000);
+        }, INFORMER_RESTART_DELAY_MS);
     });
 
-    await informer.start();
-    log.info("watching for pod changes across all namespaces");
+    await startInformer(informer);
 
     setInterval(() => {
         heartbeat().catch((err) =>

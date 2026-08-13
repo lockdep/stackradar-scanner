@@ -34,10 +34,14 @@
     "watcher": {
       "type": "object",
       "additionalProperties": false,
+
+      "$comment": "healthPort is constrained to 1024-65535 rather than to digits like the other numeric values, because both ends of that range are real: 0 would have the kernel pick a port the probes do not know about, and anything under 1024 cannot be bound by a container that drops every capability. Either mistake produces a pod that fails its own liveness probe and restarts forever, diagnosed as \"the new probe is broken\".",
+
       "properties": {
         "enabled":         { "type": "boolean" },
         "sweepIntervalMs": { "type": "string", "pattern": "^[0-9]+$" },
         "concurrentScans": { "type": "string", "pattern": "^[0-9]+$" },
+        "healthPort":      { "type": "string", "pattern": "^(102[4-9]|10[3-9][0-9]|1[1-9][0-9]{2}|[2-9][0-9]{3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])$" },
         "resources":       { "type": "object" }
       }
     },

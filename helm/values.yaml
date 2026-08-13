@@ -61,6 +61,13 @@ watcher:
   # Each invocation can use 300–600 MiB for large images; keeping this at 1 avoids OOM kills.
   concurrentScans: "1"
 
+  # -- Port for the agent's liveness and readiness endpoints. Not exposed by a
+  # Service — the kubelet reaches it on the pod IP and nothing else does. Change
+  # it only if something else in the pod's network namespace already listens
+  # here. Must be 1024 or above: the container drops every Linux capability, so
+  # it cannot bind a privileged port.
+  healthPort: "8081"
+
   # -- Resource requests and limits for the watcher Deployment.
   resources:
     requests:

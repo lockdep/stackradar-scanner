@@ -1,6 +1,7 @@
 import * as fs from "fs";
 import { API_URL, API_KEY, SCANNER_VERSION, CLUSTER_NAME, CLUSTER_ID } from "./scan.js";
 import { log } from "./logger.js";
+import { recordHeartbeatOk, recordHeartbeatFailure } from "./health.js";
 
 // ─── HTTP with retry ─────────────────────────────────────────────────────────
 
@@ -66,14 +67,33 @@ async function fetchWithRetry(
 
 // ─── Heartbeat ───────────────────────────────────────────────────────────────
 
+/**
+ * Reports the agent to the control plane, and records the outcome for
+ * `/healthz`.
+ *
+ * Both failure paths are counted, not just the rejection: a proxy dispatcher
+ * pointed at an endpoint that has moved never gets a response at all, and that
+ * is precisely the fault a restart clears.
+ */
 export async function heartbeat(): Promise<void> {
     const url = `${API_URL}/v1/heartbeat`;
     const headers: Record<string, string> = { "X-API-Key": API_KEY! };
     if (CLUSTER_ID) headers["X-Cluster-Id"] = CLUSTER_ID;
-    const response = await fetchWithRetry(url, { method: "POST", headers });
+
+    let response: Response;
+    try {
+        response = await fetchWithRetry(url, { method: "POST", headers });
+    } catch (err) {
+        recordHeartbeatFailure();
+        throw err;
+    }
+
     if (!response.ok) {
+        recordHeartbeatFailure();
         throw new Error(`heartbeat rejected by server: HTTP ${response.status} — check API key, API URL, and cluster ID`);
     }
+
+    recordHeartbeatOk();
     log.info("heartbeat ok");
 }
 

@@ -20,6 +20,13 @@ Removed, Fixed, Security — so use those six and nothing else.
 
 ### Added
 
+- `watcher.healthPort` — the port the agent's new liveness and readiness
+  endpoints listen on, `8081` by default. Nothing exposes it through a Service;
+  the kubelet reaches it on the pod IP. Change it only if something else in the
+  pod's network namespace already listens there, and note that a cluster with a
+  default-deny NetworkPolicy has to allow the kubelet in on it or the probes
+  fail.
+
 - `serviceAccount.annotations`, `podLabels` and `podAnnotations` — pull from
   your cloud's own registry using workload identity instead of a static
   credential. Annotate the ServiceAccount for EKS IRSA
@@ -99,6 +106,36 @@ Removed, Fixed, Security — so use those six and nothing else.
   chart is published. Releases are now tested against Helm 4. Nothing about
   the chart changed — it uses no Helm 4-only features, so existing Helm 3
   installs are unaffected.
+
+### Fixed
+
+- The watcher's liveness probe can now fail. It used to run
+  `node -e "process.exit(0)"`, which starts a second Node process and exits 0
+  no matter what the agent is doing — it proved the image contains a Node
+  binary and nothing else. The probe now asks the running process, over HTTP on
+  `watcher.healthPort`.
+
+  The failure this catches is the one worth catching. When the pod's watch on
+  the Kubernetes API breaks — an expired token, RBAC revoked, a NetworkPolicy
+  that no longer allows the API server — the agent retries every five seconds
+  and otherwise carries on: alive, Ready, heartbeating, and scanning nothing.
+  Your cluster looked healthy in StackRadar the whole time, and the first
+  evidence otherwise was a vulnerability nobody was told about. `/healthz` now
+  reports non-2xx once the watch has been down for three failed restarts, and
+  the kubelet restarts the pod after three more failures a minute apart.
+
+  Deliberately not part of it: how long since the last pod event. A cluster
+  whose workloads have not changed since last night produces no events and is
+  perfectly healthy.
+
+  There is also a readiness probe now, on `/readyz`, which reports not-ready
+  until the informer's first sync completes — so `helm upgrade --wait` and
+  `kubectl rollout status` stop reporting a large cluster's rollout complete
+  before the agent has seen a single pod.
+
+  You may now see the watcher restart where it previously sat there quietly
+  doing nothing, which is the point. A brief API server outage will not do it:
+  a fault has to persist for about three minutes.
 
 ## [0.1.0] - 2026-08-13
 
