@@ -41,6 +41,18 @@
         "resources":       { "type": "object" }
       }
     },
+    "proxy": {
+      "type": "object",
+      "additionalProperties": false,
+
+      "$comment": "A pattern rather than \"format\": \"uri\". Two reasons: the empty default is not a valid URI and would fail every install that leaves these unset, and `proxy.corp:8080` — the mistake people actually make — *is* a valid URI, so format would accept the one value that does not work. The pattern accepts empty or a scheme-qualified URL and nothing else.",
+
+      "properties": {
+        "httpProxy":  { "type": "string", "pattern": "^(https?://.+)?$" },
+        "httpsProxy": { "type": "string", "pattern": "^(https?://.+)?$" },
+        "noProxy":    { "type": "string" }
+      }
+    },
     "dockerConfigSecret": { "type": "string" },
     "image": {
       "type": "object",

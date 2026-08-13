@@ -21,6 +21,7 @@ import {
     ImageInfo,
 } from "./lib/scan.js";
 import { heartbeat, checkExistingSbom, uploadSBOM } from "./lib/client.js";
+import { configureProxy } from "./lib/proxy.js";
 import { log } from "./lib/logger.js";
 import { parseImageRef } from "./parse-image-ref.js";
 
@@ -182,6 +183,10 @@ async function main(): Promise<void> {
         resolveImagePullSecrets: RESOLVE_IMAGE_PULL_SECRETS,
         sweepIntervalMs: SWEEP_INTERVAL_MS || "disabled",
     }, "StackRadar cluster watcher starting");
+
+    // Before the first heartbeat: in a cluster with no direct egress, every
+    // request below this line has to go through the proxy or fail.
+    configureProxy();
 
     const kc = loadKubeConfig();
     const coreApi = kc.makeApiClient(k8s.CoreV1Api);

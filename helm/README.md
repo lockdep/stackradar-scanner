@@ -77,6 +77,39 @@ helm install stackradar-scanner oci://ghcr.io/lockdep/charts/stackradar-scanner 
   --set stackradar.existingSecret=my-secret
 ```
 
+## Behind a corporate proxy
+
+In a cluster with no direct internet egress, point the agent at your proxy:
+
+```bash
+helm install stackradar-scanner oci://ghcr.io/lockdep/charts/stackradar-scanner \
+  --version <version> \
+  --namespace stackradar --create-namespace \
+  --set stackradar.existingSecret=my-secret \
+  --set proxy.httpsProxy=http://proxy.corp:8080 \
+  --set proxy.noProxy=registry.internal
+```
+
+Include the scheme — `proxy.corp:8080` is rejected at install time rather than
+half-working later.
+
+This sets `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` on the pod, in both cases,
+and the agent installs a proxy dispatcher for its own HTTP client at startup.
+That second part is not optional: Node's built-in `fetch` ignores the
+conventional environment variables, so a chart that only set them would fix
+Syft's registry pulls and leave every call to the StackRadar API failing. The
+startup log names the proxy in use, with any `user:pass@` redacted.
+
+`kubernetes.default.svc`, `.svc`, `.cluster.local`, `localhost` and `127.0.0.1`
+are always appended to `NO_PROXY`, so Kubernetes API traffic stays inside the
+cluster. Add your internal registries to `proxy.noProxy` so image pulls do too.
+
+Leaving both URLs empty renders no environment variables at all, which is what
+every install that does not need a proxy gets.
+
+If your proxy terminates TLS — most do — the agent also needs to trust its CA.
+That is not yet configurable in this chart.
+
 ## Verifying the release
 
 The chart and the image it deploys are signed with [cosign](https://docs.sigstore.dev/)
@@ -160,6 +193,9 @@ See [RELEASING.md](https://github.com/lockdep/stackradar-scanner/blob/main/RELEA
 | nodeSelector | object | `{}` | Node selector for pod scheduling. |
 | podSecurityContext | object | `{"fsGroup":65534,"runAsGroup":65534,"runAsNonRoot":true,"runAsUser":65534}` | Pod-level security context. |
 | priorityClassName | string | `""` | PriorityClassName so the scanner yields resources to application pods. |
+| proxy.httpProxy | string | `""` | HTTP proxy URL for outbound traffic, e.g. `http://proxy.corp:8080`. Include the scheme — a bare `proxy.corp:8080` is rejected, because tools that read these variables disagree about what a scheme-less value means. |
+| proxy.httpsProxy | string | `""` | HTTPS proxy URL for outbound traffic. Set this one if you set only one: the StackRadar API and most registries are reached over https. |
+| proxy.noProxy | string | `""` | Comma-separated hosts that bypass the proxy. The in-cluster Kubernetes API (`kubernetes.default.svc`, `.svc`, `.cluster.local`, `localhost`, `127.0.0.1`) is always appended, so list only your own internal registries here. |
 | scanner.excludeNamespaces | string | `"kube-system,kube-public,kube-node-lease"` | Comma-separated list of namespaces to exclude from scanning. |
 | scanner.imagePullSecretNames | list | `[]` | Names of the imagePullSecrets the scanner is allowed to read. When empty, the ClusterRole grants `secrets get` cluster-wide. Naming your pull secrets here narrows the grant to those names via RBAC `resourceNames` — the recommended setting. Names match in every namespace: a Secret called `regcred` anywhere in the cluster is readable, so use distinct names if that matters to you. A Secret left off the list is not readable, and images that need it fall back to an anonymous pull — the agent logs a warning naming the Secret. Only used when `scanner.resolveImagePullSecrets` is "true". |
 | scanner.includeNamespaces | string | `""` | Comma-separated list of namespaces to scan. When set, ONLY these namespaces are scanned. |

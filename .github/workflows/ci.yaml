@@ -139,6 +139,18 @@ jobs:
                  --set stackradar.existingSecretKeyClusterId=id
           render --set stackradar.existingSecret=my-secret \
                  --set nameOverride=scanner --set fullnameOverride=my-scanner
+          # Proxy: each URL on its own, both together, and with a user-supplied
+          # bypass list that the in-cluster addresses are appended to. The
+          # default case — no proxy env vars rendered at all — is covered by
+          # every other case here.
+          render --set stackradar.existingSecret=my-secret \
+                 --set proxy.httpsProxy=http://proxy.corp:8080
+          render --set stackradar.existingSecret=my-secret \
+                 --set proxy.httpProxy=http://proxy.corp:8080
+          render --set stackradar.existingSecret=my-secret \
+                 --set proxy.httpProxy=http://proxy.corp:8080 \
+                 --set proxy.httpsProxy=http://proxy.corp:8443 \
+                 --set 'proxy.noProxy=registry.internal\,.corp'
           # A released chart: the stamped tag matches appVersion and a digest
           # pins the bytes. Must render — this is what every customer installs.
           render --set stackradar.existingSecret=my-secret \
@@ -148,6 +160,39 @@ jobs:
           render --set stackradar.existingSecret=my-secret \
                  --set image.tag=1.3.0 \
                  --set image.digest=
+
+      # Two invariants that a template edit could break without breaking any
+      # render: an install that sets no proxy must be byte-identical to one
+      # from before proxy support existed, and an install that does set one
+      # must never send Kubernetes API traffic through it.
+      - name: Assert proxy env rendering
+        run: |
+          set -euo pipefail
+
+          # Captured before grepping, not piped into it: a `helm template` that
+          # fails outright produces no output and would otherwise satisfy the
+          # "must not mention a proxy" check by rendering nothing at all.
+          out=$(helm template stackradar-scanner helm/ --namespace stackradar \
+                --set stackradar.existingSecret=my-secret)
+          if printf '%s' "${out}" | grep -iq "proxy"; then
+            echo "::error file=helm/templates/deployment.yaml::the default render mentions a proxy;" \
+                 "unset proxy values must render nothing at all"
+            exit 1
+          fi
+          echo "ok: no proxy env vars without a configured proxy"
+
+          out=$(helm template stackradar-scanner helm/ --namespace stackradar \
+                --set stackradar.existingSecret=my-secret \
+                --set proxy.httpsProxy=http://proxy.corp:8080)
+          for var in NO_PROXY no_proxy; do
+            if ! printf '%s' "${out}" | grep -A1 "name: ${var}$" \
+                 | grep -q "kubernetes.default.svc,.svc,.cluster.local,localhost,127.0.0.1"; then
+              echo "::error file=helm/templates/deployment.yaml::${var} does not exempt the in-cluster" \
+                   "Kubernetes API — the agent would reach the API server through the proxy"
+              exit 1
+            fi
+          done
+          echo "ok: the Kubernetes API bypasses the proxy"
 
       # The guards below only protect users if they actually reject bad input,
       # and a guard that silently stops firing is worse than none. Each case
@@ -206,6 +251,14 @@ jobs:
           refute "non-string imagePullSecretNames entry" "imagePullSecretNames.*string" \
             --set stackradar.existingSecret=my-secret \
             --set 'scanner.imagePullSecretNames={1,2}'
+
+          # A proxy URL with no scheme is the mistake people actually make, and
+          # `format: uri` would accept it — hence the pattern in the schema.
+          # Nothing downstream agrees on what a scheme-less proxy means, so the
+          # install has to fail rather than half-work.
+          refute "proxy URL without a scheme" "proxy.httpsProxy.*pattern" \
+            --set stackradar.existingSecret=my-secret \
+            --set proxy.httpsProxy=proxy.corp:8080
 
           # Overriding the tag while a digest is still pinned runs the digest's
           # image under the wrong label. Must be loud.

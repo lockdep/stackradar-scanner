@@ -72,6 +72,39 @@ helm install stackradar-scanner oci://ghcr.io/lockdep/charts/stackradar-scanner 
   --set stackradar.existingSecret=my-secret
 ```
 
+## Behind a corporate proxy
+
+In a cluster with no direct internet egress, point the agent at your proxy:
+
+```bash
+helm install stackradar-scanner oci://ghcr.io/lockdep/charts/stackradar-scanner \
+  --version <version> \
+  --namespace stackradar --create-namespace \
+  --set stackradar.existingSecret=my-secret \
+  --set proxy.httpsProxy=http://proxy.corp:8080 \
+  --set proxy.noProxy=registry.internal
+```
+
+Include the scheme — `proxy.corp:8080` is rejected at install time rather than
+half-working later.
+
+This sets `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` on the pod, in both cases,
+and the agent installs a proxy dispatcher for its own HTTP client at startup.
+That second part is not optional: Node's built-in `fetch` ignores the
+conventional environment variables, so a chart that only set them would fix
+Syft's registry pulls and leave every call to the StackRadar API failing. The
+startup log names the proxy in use, with any `user:pass@` redacted.
+
+`kubernetes.default.svc`, `.svc`, `.cluster.local`, `localhost` and `127.0.0.1`
+are always appended to `NO_PROXY`, so Kubernetes API traffic stays inside the
+cluster. Add your internal registries to `proxy.noProxy` so image pulls do too.
+
+Leaving both URLs empty renders no environment variables at all, which is what
+every install that does not need a proxy gets.
+
+If your proxy terminates TLS — most do — the agent also needs to trust its CA.
+That is not yet configurable in this chart.
+
 ## Verifying the release
 
 The chart and the image it deploys are signed with [cosign](https://docs.sigstore.dev/)

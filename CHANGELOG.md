@@ -32,6 +32,28 @@ Removed, Fixed, Security — so use those six and nothing else.
   pull. The agent logs a warning naming the Secret and the namespace and
   finishes the rest of the scan.
 
+- `proxy.httpProxy`, `proxy.httpsProxy` and `proxy.noProxy` — run the scanner in
+  a cluster with no direct internet egress. Setting either URL puts
+  `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` on the pod in both upper and lower
+  case, and the agent now routes its own HTTP through the proxy as well.
+
+  That last part is why this needed an agent release and not just a chart value:
+  Node's built-in `fetch` ignores the conventional proxy variables, so setting
+  them by hand previously fixed Syft's registry pulls while every call to the
+  StackRadar API kept failing — the agent started, logged a heartbeat failure,
+  and indexed nothing.
+
+  `kubernetes.default.svc`, `.svc`, `.cluster.local`, `localhost` and
+  `127.0.0.1` are always appended to `NO_PROXY`, so Kubernetes API traffic never
+  goes through the proxy; add your internal registries to `proxy.noProxy` so
+  image pulls do not either. Include the scheme in the URLs — `proxy.corp:8080`
+  is rejected at install time. The startup log names the proxy with any
+  `user:pass@` redacted. Both URLs are empty by default and render no
+  environment variables at all, so nothing changes for existing installs.
+
+  If your proxy also terminates TLS, the agent needs to trust its CA — that is
+  not configurable yet.
+
 ### Changed
 
 - The documented Helm requirement is now `3.8+ or Helm 4`, replacing a `3.10+`

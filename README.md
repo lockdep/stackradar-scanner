@@ -154,6 +154,10 @@ no privilege escalation, `/tmp` on an `emptyDir`. The pod needs egress to your
 StackRadar endpoint, to the Kubernetes API, and to whichever registries host
 your images.
 
+Where that egress goes through a corporate proxy, set `proxy.httpsProxy` (see
+[Behind a corporate proxy](helm/README.md#behind-a-corporate-proxy)). Kubernetes
+API traffic is exempted from the proxy automatically and stays in the cluster.
+
 ## Verifying what you install
 
 Every release is signed with [cosign](https://docs.sigstore.dev/) keyless

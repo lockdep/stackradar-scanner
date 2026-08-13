@@ -70,6 +70,21 @@ watcher:
       cpu: 2000m
       memory: 1Gi
 
+proxy:
+  # -- HTTP proxy URL for outbound traffic, e.g. `http://proxy.corp:8080`. Include the
+  # scheme — a bare `proxy.corp:8080` is rejected, because tools that read these
+  # variables disagree about what a scheme-less value means.
+  httpProxy: ""
+
+  # -- HTTPS proxy URL for outbound traffic. Set this one if you set only one:
+  # the StackRadar API and most registries are reached over https.
+  httpsProxy: ""
+
+  # -- Comma-separated hosts that bypass the proxy. The in-cluster Kubernetes API
+  # (`kubernetes.default.svc`, `.svc`, `.cluster.local`, `localhost`, `127.0.0.1`)
+  # is always appended, so list only your own internal registries here.
+  noProxy: ""
+
 # -- Name of a `kubernetes.io/dockerconfigjson` Secret to mount as a docker config,
 # allowing syft to pull from private registries.
 # Create with: `kubectl create secret generic registry-credentials --from-file=.dockerconfigjson=...`

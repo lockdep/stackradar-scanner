@@ -14,6 +14,12 @@ is the empty default — which is every chart built outside CI.
 {{- $secretName := .Values.stackradar.existingSecret | default (include "stackradar-scanner.fullname" .) }}
 {{- $secretKeyApiKey := .Values.stackradar.existingSecretKeyApiKey | default "api-key" }}
 {{- $secretKeyClusterId := .Values.stackradar.existingSecretKeyClusterId | default "cluster-id" }}
+{{- /*
+The in-cluster addresses are appended to whatever the user listed, never
+replaced. Reaching the API server through a corporate proxy fails, or worse
+succeeds via a route nobody intended, and the agent talks to it constantly.
+*/ -}}
+{{- $noProxy := join "," (append (compact (list .Values.proxy.noProxy)) "kubernetes.default.svc,.svc,.cluster.local,localhost,127.0.0.1") }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -114,6 +120,31 @@ spec:
             {{- if .Values.dockerConfigSecret }}
             - name: DOCKER_CONFIG
               value: /home/node/.docker
+            {{- end }}
+            {{- /*
+            Both spellings of every variable: syft reads the upper-case ones,
+            plenty of tooling reads only the lower-case ones, and a cluster
+            where the agent silently bypasses the proxy is the failure this
+            whole block exists to prevent. Nothing renders when no proxy is
+            configured, so an existing install sees no diff.
+            */ -}}
+            {{- if or .Values.proxy.httpProxy .Values.proxy.httpsProxy }}
+            {{- with .Values.proxy.httpProxy }}
+            - name: HTTP_PROXY
+              value: {{ . | quote }}
+            - name: http_proxy
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.proxy.httpsProxy }}
+            - name: HTTPS_PROXY
+              value: {{ . | quote }}
+            - name: https_proxy
+              value: {{ . | quote }}
+            {{- end }}
+            - name: NO_PROXY
+              value: {{ $noProxy | quote }}
+            - name: no_proxy
+              value: {{ $noProxy | quote }}
             {{- end }}
 
           volumeMounts:
