@@ -13,10 +13,20 @@ rules:
     resources: ["pods"]
     verbs: ["list", "watch"]
   {{- if eq (.Values.scanner.resolveImagePullSecrets | toString) "true" }}
-  # Read imagePullSecrets to resolve private registry credentials per workload
+  # Read imagePullSecrets to resolve private registry credentials per workload.
+  {{- if .Values.scanner.imagePullSecretNames }}
+  # Narrowed to the names in `scanner.imagePullSecretNames`. resourceNames is
+  # legal here because the agent only ever `get`s a Secret by name — it never
+  # lists or watches them. Note this matches those names in every namespace:
+  # a ClusterRole has no namespace to scope them to.
+  {{- end }}
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["get"]
+    {{- with .Values.scanner.imagePullSecretNames }}
+    resourceNames:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
   {{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1

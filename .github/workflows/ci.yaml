@@ -122,6 +122,18 @@ jobs:
           render --set stackradar.existingSecret=my-secret --set dockerConfigSecret=regcred
           render --set stackradar.existingSecret=my-secret --set scanner.includeNamespaces=default
           render --set stackradar.existingSecret=my-secret --set watcher.enabled=false
+          # The three states of the `secrets get` rule: cluster-wide (the
+          # default, covered by every case above), narrowed to named Secrets
+          # via resourceNames, and absent. `--set-string` because
+          # resolveImagePullSecrets is a string value — a bare `=false` reaches
+          # the schema as a boolean and is rejected.
+          render --set stackradar.existingSecret=my-secret \
+                 --set 'scanner.imagePullSecretNames={regcred,ghcr-creds}'
+          render --set stackradar.existingSecret=my-secret \
+                 --set-string scanner.resolveImagePullSecrets=false
+          render --set stackradar.existingSecret=my-secret \
+                 --set-string scanner.resolveImagePullSecrets=false \
+                 --set 'scanner.imagePullSecretNames={regcred}'
           render --set stackradar.existingSecret=my-secret \
                  --set stackradar.existingSecretKeyApiKey=key \
                  --set stackradar.existingSecretKeyClusterId=id
@@ -186,6 +198,14 @@ jobs:
           refute "unknown top-level key" "[Aa]dditional propert(y|ies) '?totallyBogus'? (is )?not allowed" \
             --set stackradar.existingSecret=my-secret \
             --set totallyBogus=1
+
+          # A pull secret allowlist is only worth having if the schema keeps it
+          # a list of names. The two validators word type errors differently
+          # (see above), so the pattern asserts the key and `string` rather
+          # than one validator's phrasing.
+          refute "non-string imagePullSecretNames entry" "imagePullSecretNames.*string" \
+            --set stackradar.existingSecret=my-secret \
+            --set 'scanner.imagePullSecretNames={1,2}'
 
           # Overriding the tag while a digest is still pinned runs the digest's
           # image under the wrong label. Must be loud.

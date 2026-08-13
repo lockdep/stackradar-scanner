@@ -1,4 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import * as k8s from "@kubernetes/client-node";
+import { log } from "./logger.js";
 import {
     RELEVANT_POD_LABEL_KEYS,
     RELEVANT_POD_ANNOTATION_KEYS,
@@ -6,6 +8,7 @@ import {
     pickPodAnnotations,
     deriveWorkloadName,
     shouldScan,
+    resolveRegistryAuth,
 } from "./scan.js";
 
 // These tests guard the boundary README.md describes to customers: what pod
@@ -241,5 +244,86 @@ describe("shouldScan", () => {
         const fn = await load({ INCLUDE_NAMESPACES: " payments , checkout " });
         expect(fn("payments")).toBe(true);
         expect(fn("checkout")).toBe(true);
+    });
+});
+
+// The 403 path exists because `scanner.imagePullSecretNames` narrows the
+// ClusterRole to named Secrets: a workload referencing one that was left off
+// the list gets a denial rather than a Secret. That has to cost the image its
+// credentials and nothing more — an exception here would abort a scan over a
+// deliberate RBAC setting.
+describe("resolveRegistryAuth", () => {
+    const dockerConfig = (registry: string, user: string, pass: string) => ({
+        data: {
+            ".dockerconfigjson": Buffer.from(
+                JSON.stringify({
+                    auths: { [registry]: { auth: Buffer.from(`${user}:${pass}`).toString("base64") } },
+                })
+            ).toString("base64"),
+        },
+    });
+
+    // A fake CoreV1Api that serves the named secrets and denies everything
+    // else the way the API server does when resourceNames excludes a name.
+    const coreApiWith = (secrets: Record<string, unknown>) =>
+        ({
+            readNamespacedSecret: vi.fn(async ({ name }: { name: string }) => {
+                const secret = secrets[name];
+                if (!secret) throw new k8s.ApiException(403, "Forbidden", {}, {});
+                return secret;
+            }),
+        }) as unknown as k8s.CoreV1Api;
+
+    let warn: ReturnType<typeof vi.spyOn>;
+    beforeEach(() => {
+        warn = vi.spyOn(log, "warn").mockImplementation(() => undefined);
+    });
+    afterEach(() => {
+        warn.mockRestore();
+    });
+
+    it("decodes the credentials in a dockerconfigjson Secret", async () => {
+        const auths = await resolveRegistryAuth(
+            coreApiWith({ regcred: dockerConfig("ghcr.io", "bot", "hunter2") }),
+            "payments",
+            ["regcred"]
+        );
+        expect(auths).toEqual({ "ghcr.io": { username: "bot", password: "hunter2" } });
+        expect(warn).not.toHaveBeenCalled();
+    });
+
+    it("keeps going past a denied Secret and still returns the ones it could read", async () => {
+        const auths = await resolveRegistryAuth(
+            coreApiWith({ allowed: dockerConfig("ghcr.io", "bot", "hunter2") }),
+            "payments",
+            ["denied", "allowed"]
+        );
+        expect(auths).toEqual({ "ghcr.io": { username: "bot", password: "hunter2" } });
+    });
+
+    // The log line is the whole UX of the allowlist: someone who forgets a
+    // Secret finds out which one from this, or not at all.
+    it("names the denied Secret, its namespace and the value to fix", async () => {
+        await resolveRegistryAuth(coreApiWith({}), "payments", ["regcred"]);
+
+        expect(warn).toHaveBeenCalledTimes(1);
+        const [fields, message] = warn.mock.calls[0] as [Record<string, unknown>, string];
+        expect(fields).toMatchObject({ secret: "regcred", namespace: "payments", status: 403 });
+        expect(message).toContain("scanner.imagePullSecretNames");
+    });
+
+    // Nothing about a pod referencing a Secret that does not exist is an
+    // allowlist problem, so that advice must not be attached to it.
+    it("does not blame the allowlist for a failure that is not a denial", async () => {
+        const coreApi = {
+            readNamespacedSecret: vi.fn(async () => {
+                throw new k8s.ApiException(404, "Not Found", {}, {});
+            }),
+        } as unknown as k8s.CoreV1Api;
+
+        await expect(resolveRegistryAuth(coreApi, "payments", ["regcred"])).resolves.toEqual({});
+        const [fields, message] = warn.mock.calls[0] as [Record<string, unknown>, string];
+        expect(fields).toMatchObject({ secret: "regcred", status: 404 });
+        expect(message).not.toContain("scanner.imagePullSecretNames");
     });
 });

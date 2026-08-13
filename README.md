@@ -66,17 +66,44 @@ Rendered from [`helm/templates/clusterrole.yaml`](helm/templates/clusterrole.yam
 | Resource | Verbs | Why |
 | --- | --- | --- |
 | `pods` | `list`, `watch` | Discover running images; `watch` drives the real-time scanning, `list` backs the informer's initial sync and the periodic sweep |
-| `secrets` | `get` | Resolve `imagePullSecrets` so private-registry images can be pulled |
+| `secrets` | `get` | Resolve `imagePullSecrets` so private-registry images can be pulled — [narrow this to named Secrets](#narrowing-secrets-get) or turn it off |
 
 That is the whole ClusterRole. The agent reads no Deployments, StatefulSets,
 DaemonSets, CronJobs or Jobs — everything it reports is derived from pods.
 
-That `secrets get` grant is cluster-wide — RBAC cannot scope it to only the
-Secrets referenced as `imagePullSecrets`. The agent reads only the Secrets named
-in a workload's `imagePullSecrets` and uses them to build a temporary Docker
-config for syft, but you are granting more than it uses. If you pull only from
-public registries, or you mount one static pull secret via `dockerConfigSecret`,
-turn it off and the rule disappears from the ClusterRole:
+### Narrowing `secrets get`
+
+By default the `secrets get` grant is cluster-wide. The agent uses far less than
+that — it reads only the Secrets named in a workload's `imagePullSecrets`, and
+uses them to build a temporary Docker config for syft — so name your pull
+secrets and the grant shrinks to exactly those, via RBAC `resourceNames`:
+
+```bash
+--set 'scanner.imagePullSecretNames={regcred,ghcr-creds}'
+```
+
+```yaml
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["get"]
+  resourceNames: ["regcred", "ghcr-creds"]
+```
+
+This is the recommended setting, and it is safe to narrow because the agent only
+ever `get`s a Secret by name — it never lists or watches them. Two things to
+know before you set it:
+
+- **It is a name match, not a namespace match.** `resourceNames` in a
+  ClusterRole has no namespace to scope to, so a Secret called `regcred` is
+  readable in *every* namespace. Use distinct names where that matters.
+- **A new registry needs a list update.** A Secret you leave off is denied, and
+  images that needed it fall back to an anonymous pull — which fails for a
+  private registry. The agent logs a warning naming the Secret and the
+  namespace, and carries on with the rest of the scan.
+
+If you pull only from public registries, or you mount one static pull secret via
+`dockerConfigSecret`, turn resolution off entirely and the rule disappears from
+the ClusterRole:
 
 ```bash
 --set scanner.resolveImagePullSecrets=false

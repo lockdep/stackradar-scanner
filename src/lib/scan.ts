@@ -218,7 +218,26 @@ export async function resolveRegistryAuth(
                 }
             }
         } catch (err) {
-            log.warn({ secret: name, namespace, err: err instanceof Error ? err.message : String(err) }, "could not read pull secret");
+            // Never fatal. A Secret that cannot be read costs the credentials
+            // it held, not the scan: whatever else resolved is still used, and
+            // an image with no credentials left falls back to an anonymous
+            // pull. 403 is the expected shape of a chart installed with
+            // `scanner.imagePullSecretNames` — the ClusterRole names the
+            // Secrets the agent may read and this one is not among them — so
+            // it is called out by name, because naming it is the only way
+            // someone who left a Secret off the list finds out which one.
+            const status = err instanceof k8s.ApiException ? err.code : undefined;
+            log.warn(
+                {
+                    secret: name,
+                    namespace,
+                    status,
+                    err: err instanceof Error ? err.message : String(err),
+                },
+                status === 403
+                    ? "not permitted to read pull secret — add it to scanner.imagePullSecretNames if it belongs there; continuing without its credentials"
+                    : "could not read pull secret — continuing without its credentials"
+            );
         }
     }
     return auths;

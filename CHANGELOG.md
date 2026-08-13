@@ -18,6 +18,20 @@ Removed, Fixed, Security — so use those six and nothing else.
 
 ## [Unreleased]
 
+### Added
+
+- `scanner.imagePullSecretNames` — name the pull secrets the scanner may read
+  and its `secrets get` grant narrows to exactly those, through RBAC
+  `resourceNames`. Previously the only choice was cluster-wide `secrets get` or
+  no private-registry support at all. The default is empty, which renders the
+  same unrestricted rule as before, so nothing changes until you set it.
+
+  Worth knowing before you do: `resourceNames` in a ClusterRole matches a name
+  in *every* namespace — it is not a namespace-scoped grant — and a Secret left
+  off the list is denied, so images that needed it fall back to an anonymous
+  pull. The agent logs a warning naming the Secret and the namespace and
+  finishes the rest of the scan.
+
 ### Changed
 
 - The documented Helm requirement is now `3.8+ or Helm 4`, replacing a `3.10+`

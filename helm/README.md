@@ -161,8 +161,9 @@ See [RELEASING.md](https://github.com/lockdep/stackradar-scanner/blob/main/RELEA
 | podSecurityContext | object | `{"fsGroup":65534,"runAsGroup":65534,"runAsNonRoot":true,"runAsUser":65534}` | Pod-level security context. |
 | priorityClassName | string | `""` | PriorityClassName so the scanner yields resources to application pods. |
 | scanner.excludeNamespaces | string | `"kube-system,kube-public,kube-node-lease"` | Comma-separated list of namespaces to exclude from scanning. |
+| scanner.imagePullSecretNames | list | `[]` | Names of the imagePullSecrets the scanner is allowed to read. When empty, the ClusterRole grants `secrets get` cluster-wide. Naming your pull secrets here narrows the grant to those names via RBAC `resourceNames` — the recommended setting. Names match in every namespace: a Secret called `regcred` anywhere in the cluster is readable, so use distinct names if that matters to you. A Secret left off the list is not readable, and images that need it fall back to an anonymous pull — the agent logs a warning naming the Secret. Only used when `scanner.resolveImagePullSecrets` is "true". |
 | scanner.includeNamespaces | string | `""` | Comma-separated list of namespaces to scan. When set, ONLY these namespaces are scanned. |
-| scanner.resolveImagePullSecrets | string | `"true"` | Resolve imagePullSecrets from workload pod specs for private registry auth. Requires `secrets get` permission in the ClusterRole. |
+| scanner.resolveImagePullSecrets | string | `"true"` | Resolve imagePullSecrets from workload pod specs for private registry auth. Requires `secrets get` permission in the ClusterRole, which `scanner.imagePullSecretNames` narrows to a named set of Secrets. |
 | scanner.skipExistingDigests | string | `"true"` | Skip images whose digest is already indexed in StackRadar. Eliminates redundant syft runs when the image binary has not changed. |
 | scanner.syftTimeoutMs | string | `"300000"` | Timeout per image scan in milliseconds. |
 | securityContext | object | `{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"readOnlyRootFilesystem":true}` | Container-level security context. |

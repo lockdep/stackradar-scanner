@@ -35,8 +35,19 @@ scanner:
   skipExistingDigests: "true"
 
   # -- Resolve imagePullSecrets from workload pod specs for private registry auth.
-  # Requires `secrets get` permission in the ClusterRole.
+  # Requires `secrets get` permission in the ClusterRole, which
+  # `scanner.imagePullSecretNames` narrows to a named set of Secrets.
   resolveImagePullSecrets: "true"
+
+  # -- Names of the imagePullSecrets the scanner is allowed to read. When empty,
+  # the ClusterRole grants `secrets get` cluster-wide. Naming your pull secrets
+  # here narrows the grant to those names via RBAC `resourceNames` — the
+  # recommended setting. Names match in every namespace: a Secret called
+  # `regcred` anywhere in the cluster is readable, so use distinct names if that
+  # matters to you. A Secret left off the list is not readable, and images that
+  # need it fall back to an anonymous pull — the agent logs a warning naming the
+  # Secret. Only used when `scanner.resolveImagePullSecrets` is "true".
+  imagePullSecretNames: []
 
 watcher:
   # -- Enable the event-driven watcher with periodic sweeps.
