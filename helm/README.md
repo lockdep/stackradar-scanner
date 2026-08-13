@@ -23,7 +23,11 @@ Event-driven Kubernetes scanner that watches pod changes in real time, generates
 ## Prerequisites
 
 - Kubernetes 1.24+
-- Helm 3.10+
+- Helm 3.8+ or Helm 4 — 3.8 is where installing from an OCI registry stopped
+  being experimental, and this chart is only published to one. Releases are
+  tested against Helm 4; the chart uses nothing Helm 4-only, so Helm 3 keeps
+  working until it reaches [end-of-life](https://helm.sh/blog/helm-v3-end-of-life/)
+  in February 2027.
 - A StackRadar account and API key ([sign up](https://stackradar.io))
 
 ## Installing the Chart

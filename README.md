@@ -50,6 +50,9 @@ Always pass an explicit `--version` — published versions are immutable, so
 pinning one pins exact bytes. The latest is on the
 [releases page](https://github.com/lockdep/stackradar-scanner/releases/latest).
 
+Needs Helm 3.8+ or Helm 4 — 3.8 is the floor for installing from an OCI
+registry. Releases are tested against Helm 4.
+
 SBOM upload requires a **cluster-scoped** API key; org-scoped keys are rejected.
 Full configuration reference: [`helm/README.md`](helm/README.md).
 

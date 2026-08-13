@@ -18,7 +18,14 @@ Removed, Fixed, Security — so use those six and nothing else.
 
 ## [Unreleased]
 
-Nothing yet.
+### Changed
+
+- The documented Helm requirement is now `3.8+ or Helm 4`, replacing a `3.10+`
+  that predated Helm 4 and understated what the chart actually needs: 3.8 is
+  the floor for installing from an OCI registry, which is the only way this
+  chart is published. Releases are now tested against Helm 4. Nothing about
+  the chart changed — it uses no Helm 4-only features, so existing Helm 3
+  installs are unaffected.
 
 ## [0.1.0] - 2026-08-13
 
