@@ -1,0 +1,424 @@
+name: Release
+
+# Publishes an immutable, cosigned release of the scanner image and its Helm
+# chart. The git tag is the single source of truth for the version: `v1.2.3`
+# produces image `1.2.3` and chart `1.2.3` with appVersion `1.2.3`. Nothing in
+# the repository needs to be version-bumped by hand — see RELEASING.md.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+env:
+  IMAGE: ghcr.io/lockdep/stackradar-scanner
+  CHART_REPO: ghcr.io/lockdep/charts
+  CHART_NAME: stackradar-scanner
+
+permissions:
+  contents: read
+
+# Releases must never be cancelled halfway: a run that pushed the image but not
+# the chart leaves a version half-published, and the immutability guard would
+# then block the retry.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Verify
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4 # version comes from packageManager in package.json
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck and build
+        run: pnpm run build
+
+      - name: Run tests
+        run: pnpm test
+
+  release:
+    name: Publish ${{ github.ref_name }}
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the GitHub Release
+      packages: write
+      id-token: write # cosign keyless signing via GitHub Actions OIDC
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0 # need history and prior tags to build the changelog
+
+      - name: Resolve and validate version
+        id: version
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          version="${tag#v}"
+
+          # Semver, minus build metadata: '+' is not a legal character in an OCI
+          # reference, so a `v1.2.3+build.5` tag could not be published as-is.
+          if ! printf '%s' "${version}" \
+               | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$'; then
+            echo "::error::Tag '${tag}' is not of the form v<major>.<minor>.<patch>[-prerelease]."
+            echo "::error::Build metadata ('+...') is not supported: '+' is not legal in an OCI tag."
+            exit 1
+          fi
+
+          prerelease=false
+          case "${version}" in *-*) prerelease=true ;; esac
+
+          {
+            echo "version=${version}"
+            echo "prerelease=${prerelease}"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "Releasing ${version} (prerelease=${prerelease})"
+
+      # The GitHub Release and the chart's ArtifactHub entry are both built from
+      # the CHANGELOG.md section for this version, so the wording users read is
+      # written by hand and reviewed like anything else. A version with no
+      # section falls back to the tag's commit subjects: worth a warning, not
+      # worth failing a release over.
+      - name: Extract changelog section
+        id: changelog
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          # A prerelease has no section of its own: `v1.2.3-rc.1` is a rehearsal
+          # for 1.2.3 and should carry the notes 1.2.3 will ship with.
+          candidates="${VERSION}"
+          case "${VERSION}" in *-*) candidates="${VERSION} ${VERSION%%-*}" ;; esac
+
+          section=""
+          for candidate in ${candidates}; do
+            if python3 .github/scripts/changelog.py "${candidate}" \
+                 --notes "${RUNNER_TEMP}/changelog-notes.md" \
+                 --changes "${RUNNER_TEMP}/changelog-changes.yaml"; then
+              section="${candidate}"
+              break
+            else
+              status=$?
+              # 3 is "no section for this version"; anything else is a real error.
+              [ "${status}" -eq 3 ] || exit "${status}"
+            fi
+          done
+
+          if [ -n "${section}" ]; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+            echo "--- CHANGELOG.md section for ${section} ---"
+            cat "${RUNNER_TEMP}/changelog-notes.md"
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::CHANGELOG.md has no entries for ${VERSION}. The release notes and artifacthub.io/changes fall back to commit subjects."
+          fi
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # A published version is a promise about specific bytes. Overwriting one
+      # would silently invalidate every cosign signature and digest a user has
+      # already recorded, so re-running a release for an existing version is an
+      # error rather than an update.
+      - name: Refuse to overwrite a published version
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          conflict=0
+
+          if docker buildx imagetools inspect "${IMAGE}:${VERSION}" >/dev/null 2>&1; then
+            echo "::error::${IMAGE}:${VERSION} is already published. Released versions are immutable."
+            conflict=1
+          fi
+
+          if helm show chart "oci://${CHART_REPO}/${CHART_NAME}" --version "${VERSION}" >/dev/null 2>&1; then
+            echo "::error::oci://${CHART_REPO}/${CHART_NAME}:${VERSION} is already published. Released versions are immutable."
+            conflict=1
+          fi
+
+          if [ "${conflict}" -ne 0 ]; then
+            echo "::error::To ship a change, delete the tag and cut the next version instead of reusing this one."
+            exit 1
+          fi
+
+      # Must happen before the build: package.json ships inside the runtime image,
+      # so this is the version syft reports for the agent itself when a customer
+      # scans it.
+      - name: Stamp application version
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          npm pkg set version="${VERSION}"
+          test "$(npm pkg get version | tr -d '"')" = "${VERSION}"
+
+      - name: Extract image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          # `latest` and the rolling {{major}}.{{minor}} alias are for stable
+          # releases only — a prerelease must never become what `helm install`
+          # or `docker pull` resolves to by default.
+          flavor: |
+            latest=${{ steps.version.outputs.prerelease == 'false' }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+          labels: |
+            org.opencontainers.image.title=stackradar-scanner
+            org.opencontainers.image.version=${{ steps.version.outputs.version }}
+            org.opencontainers.image.licenses=PolyForm-Shield-1.0.0
+
+      - name: Build and push image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: mode=max
+          sbom: true
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3
+
+      # Keyless signing — the certificate binds the artifact to this workflow at
+      # this tag, so there is no signing key to store, rotate, or leak.
+      - name: Sign image with Cosign (keyless)
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: cosign sign --yes "${IMAGE}@${DIGEST}"
+
+      # Stamping the chart from the tag is what keeps chart version, appVersion,
+      # the image it deploys, and the version the agent reports over
+      # `X-Scanner-Version` from ever drifting apart.
+      - name: Stamp chart metadata from the release tag
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          CHANGELOG_FOUND: ${{ steps.changelog.outputs.found }}
+        run: |
+          set -euo pipefail
+
+          yq -i '
+            .version = strenv(VERSION)
+            | .appVersion = strenv(VERSION) | .appVersion style="double"
+          ' helm/Chart.yaml
+
+          IMAGES="$(printf -- '- name: stackradar-scanner\n  image: %s:%s\n  whitelisted: true\n' \
+                    "${IMAGE}" "${VERSION}")"
+          export IMAGES
+          yq -i '.annotations."artifacthub.io/images" = strenv(IMAGES)' helm/Chart.yaml
+
+          # ArtifactHub renders this as the release's changelog entry. The
+          # CHANGELOG.md section is authoritative when there is one; commit
+          # subjects are the fallback.
+          changes="${RUNNER_TEMP}/changelog-changes.yaml"
+
+          if [ "${CHANGELOG_FOUND}" != "true" ]; then
+            prev="$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null || true)"
+            if [ -n "${prev}" ]; then
+              range="${prev}..${GITHUB_REF_NAME}"
+              echo "Changelog range: ${range}"
+            else
+              range="${GITHUB_REF_NAME}"
+              echo "No previous tag found; using full history"
+            fi
+            git log --no-merges --pretty=format:%s "${range}" > "${RUNNER_TEMP}/subjects.txt"
+
+            python3 - "${RUNNER_TEMP}/subjects.txt" > "${changes}" <<'PY'
+          import json, sys
+
+          with open(sys.argv[1]) as fh:
+              subjects = [line.strip() for line in fh if line.strip()][:50]
+          if not subjects:
+              subjects = ["Maintenance release"]
+
+          # json.dumps gives a quoted scalar that is valid YAML, so a subject
+          # containing ':' or '#' cannot break the annotation.
+          print("\n".join(
+              f"- kind: changed\n  description: {json.dumps(s, ensure_ascii=False)}"
+              for s in subjects
+          ))
+          PY
+          fi
+
+          CHANGES="$(cat "${changes}")"
+          export CHANGES
+          yq -i '.annotations."artifacthub.io/changes" = strenv(CHANGES)' helm/Chart.yaml
+
+          # Pin the exact bytes this chart was built against. The digest is what
+          # actually selects the image; the tag alongside it is for legibility.
+          yq -i '
+            .image.tag = strenv(VERSION)
+            | .image.digest = strenv(DIGEST)
+          ' helm/values.yaml
+
+          echo "--- Chart.yaml ---"
+          cat helm/Chart.yaml
+
+      - name: Lint stamped chart
+        run: helm lint helm/ --strict
+
+      - name: Package and push Helm chart
+        id: chart
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          helm package helm/ \
+            --version "${VERSION}" \
+            --app-version "${VERSION}" \
+            --destination dist/
+
+          pkg="dist/${CHART_NAME}-${VERSION}.tgz"
+          test -f "${pkg}"
+
+          # helm push reports "Pushed:" and "Digest:" on stderr.
+          helm push "${pkg}" "oci://${CHART_REPO}" 2>&1 | tee "${RUNNER_TEMP}/push.log"
+          digest="$(awk '/^Digest: /{print $2}' "${RUNNER_TEMP}/push.log")"
+          if [ -z "${digest}" ]; then
+            echo "::error::could not parse chart digest from helm push output"
+            exit 1
+          fi
+
+          {
+            echo "digest=${digest}"
+            echo "package=${pkg}"
+          } >> "$GITHUB_OUTPUT"
+
+      # Same OIDC identity as the image, so the chart and the image it deploys
+      # share one provenance chain.
+      - name: Sign chart with Cosign (keyless)
+        env:
+          CHART_DIGEST: ${{ steps.chart.outputs.digest }}
+        run: cosign sign --yes "${CHART_REPO}/${CHART_NAME}@${CHART_DIGEST}"
+
+      # Verify with the same command the docs hand to users. A signature that
+      # does not verify should fail the release, not surprise someone later.
+      - name: Verify signatures
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          CHART_DIGEST: ${{ steps.chart.outputs.digest }}
+        run: |
+          set -euo pipefail
+          identity="^https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yaml@refs/tags/"
+          for ref in "${IMAGE}@${DIGEST}" "${CHART_REPO}/${CHART_NAME}@${CHART_DIGEST}"; do
+            echo "Verifying ${ref}"
+            cosign verify \
+              --certificate-identity-regexp "${identity}" \
+              --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+              "${ref}" > /dev/null
+          done
+          echo "Both signatures verified."
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
+          PRERELEASE: ${{ steps.version.outputs.prerelease }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          CHART_DIGEST: ${{ steps.chart.outputs.digest }}
+          PACKAGE: ${{ steps.chart.outputs.package }}
+          CHANGELOG_FOUND: ${{ steps.changelog.outputs.found }}
+        run: |
+          set -euo pipefail
+          notes="${RUNNER_TEMP}/notes.md"
+          : > "${notes}"
+
+          # What changed comes first: it is the only part of these notes that
+          # someone deciding whether to upgrade actually needs.
+          if [ "${CHANGELOG_FOUND}" = "true" ]; then
+            {
+              echo "## What changed"
+              echo
+              cat "${RUNNER_TEMP}/changelog-notes.md"
+              echo
+            } >> "${notes}"
+          fi
+
+          cat >> "${notes}" <<EOF
+          ## Install
+
+          \`\`\`bash
+          helm install stackradar-scanner oci://${CHART_REPO}/${CHART_NAME} \\
+            --version ${VERSION} \\
+            --namespace stackradar --create-namespace
+          \`\`\`
+
+          ## Artifacts
+
+          | Artifact | Reference | Digest |
+          | --- | --- | --- |
+          | Image | \`${IMAGE}:${VERSION}\` | \`${DIGEST}\` |
+          | Chart | \`oci://${CHART_REPO}/${CHART_NAME}:${VERSION}\` | \`${CHART_DIGEST}\` |
+
+          ## Verify
+
+          Both artifacts are signed with [cosign](https://docs.sigstore.dev/) keyless
+          signing. No public key to distribute — the signature is bound to this
+          repository's release workflow at tag \`${GITHUB_REF_NAME}\`.
+
+          \`\`\`bash
+          cosign verify \\
+            --certificate-identity-regexp "^https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yaml@refs/tags/" \\
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \\
+            ${IMAGE}@${DIGEST}
+
+          cosign verify \\
+            --certificate-identity-regexp "^https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yaml@refs/tags/" \\
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \\
+            ${CHART_REPO}/${CHART_NAME}@${CHART_DIGEST}
+          \`\`\`
+
+          The image also carries SLSA provenance and an SBOM attestation:
+
+          \`\`\`bash
+          cosign verify-attestation --type slsaprovenance \\
+            --certificate-identity-regexp "^https://github.com/${GITHUB_REPOSITORY}/" \\
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \\
+            ${IMAGE}@${DIGEST}
+          \`\`\`
+          EOF
+
+          args=(--title "${GITHUB_REF_NAME}" --notes-file "${notes}" --generate-notes)
+          if [ "${PRERELEASE}" = "true" ]; then
+            args+=(--prerelease)
+          fi
+
+          gh release create "${GITHUB_REF_NAME}" "${args[@]}" "${PACKAGE}"

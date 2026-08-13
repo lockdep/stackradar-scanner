@@ -25,12 +25,17 @@ export const EXCLUDE_NAMESPACES = new Set(
         .filter(Boolean)
 );
 
-export const INCLUDE_NAMESPACES = process.env.INCLUDE_NAMESPACES
-    ? new Set(
-            process.env.INCLUDE_NAMESPACES.split(",")
-                .map((n) => n.trim())
-                .filter(Boolean)
-        )
+// `null` means "no allowlist, fall back to EXCLUDE_NAMESPACES". A list that
+// parses to nothing (unset, `""`, or `" , "`) has to mean that too: an empty
+// allowlist would otherwise match no namespace at all, and the agent would sit
+// there scanning nothing while looking perfectly healthy.
+const includeNamespaces = (process.env.INCLUDE_NAMESPACES ?? "")
+    .split(",")
+    .map((n) => n.trim())
+    .filter(Boolean);
+
+export const INCLUDE_NAMESPACES = includeNamespaces.length > 0
+    ? new Set(includeNamespaces)
     : null;
 
 export const SYFT_TIMEOUT_MS = parseInt(process.env.SYFT_TIMEOUT_MS ?? "300000", 10);
@@ -45,6 +50,37 @@ export function validateConfig(): void {
         log.fatal("STACKRADAR_API_URL and STACKRADAR_API_KEY are required");
         process.exit(1);
     }
+}
+
+// ─── Cluster access ──────────────────────────────────────────────────────────
+
+// Present only when a service account is mounted, i.e. only inside a pod.
+const IN_CLUSTER_TOKEN = "/var/run/secrets/kubernetes.io/serviceaccount/token";
+
+/**
+ * Loads cluster credentials, preferring the in-cluster service account and
+ * falling back to the ambient kubeconfig so the agent can be run on a laptop.
+ *
+ * Which path was taken is logged at startup: a pod that has silently picked up
+ * a mounted kubeconfig is talking to a cluster nobody intended, and that should
+ * be visible in the first few lines of its log rather than inferred later.
+ */
+export function loadKubeConfig(): k8s.KubeConfig {
+    const kc = new k8s.KubeConfig();
+
+    if (fs.existsSync(IN_CLUSTER_TOKEN)) {
+        kc.loadFromCluster();
+        log.info({ credentials: "in-cluster service account" }, "loaded cluster credentials");
+        return kc;
+    }
+
+    kc.loadFromDefault();
+    log.warn(
+        { credentials: "ambient kubeconfig", context: kc.getCurrentContext() },
+        "no service account token mounted — falling back to the ambient kubeconfig. " +
+        "This is the development path; inside a pod it means the ServiceAccount is missing"
+    );
+    return kc;
 }
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -95,7 +131,12 @@ export function shouldScan(namespace: string): boolean {
 // Labels we keep so the UI can answer "where did this image come from?".
 // Helm sets `helm.sh/chart` and `app.kubernetes.io/managed-by` as labels on
 // the rendered pod template (not annotations), so they live here.
-const RELEVANT_POD_LABEL_KEYS = new Set([
+//
+// This set and the one below are the privacy boundary README.md commits to:
+// every pod label and annotation outside them is dropped before anything is
+// sent. They are exported so scan.test.ts can snapshot them — widening either
+// one is then a visible diff in a test, not an incidental edit.
+export const RELEVANT_POD_LABEL_KEYS = new Set([
     "app",
     "version",
     "app.kubernetes.io/name",
@@ -109,7 +150,7 @@ const RELEVANT_POD_LABEL_KEYS = new Set([
 
 // Annotations we keep. These are deployment-tooling breadcrumbs that aren't
 // available as labels — chiefly Helm release context and ArgoCD app tracking.
-const RELEVANT_POD_ANNOTATION_KEYS = new Set([
+export const RELEVANT_POD_ANNOTATION_KEYS = new Set([
     "meta.helm.sh/release-name",
     "meta.helm.sh/release-namespace",
     "argocd.argoproj.io/tracking-id",

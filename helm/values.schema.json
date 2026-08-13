@@ -2,18 +2,26 @@
   "$schema": "https://json-schema.org/draft-07/schema#",
   "type": "object",
   "required": [],
+
+  "$comment": "additionalProperties is false on every object the chart defines, so a mistyped key fails the install by name instead of being silently discarded. The free-form objects below (resources, security contexts, nodeSelector, affinity) stay open on purpose: their contents are Kubernetes' to validate, not this chart's.",
+  "additionalProperties": false,
+
   "properties": {
     "stackradar": {
       "type": "object",
+      "additionalProperties": false,
       "properties": {
-        "apiUrl":         { "type": "string", "format": "uri" },
-        "clusterId":      { "type": "string" },
-        "apiKey":         { "type": "string" },
-        "existingSecret": { "type": "string" }
+        "apiUrl":                     { "type": "string", "format": "uri" },
+        "clusterId":                  { "type": "string" },
+        "apiKey":                     { "type": "string" },
+        "existingSecret":             { "type": "string" },
+        "existingSecretKeyApiKey":    { "type": "string" },
+        "existingSecretKeyClusterId": { "type": "string" }
       }
     },
     "scanner": {
       "type": "object",
+      "additionalProperties": false,
       "properties": {
         "excludeNamespaces":       { "type": "string" },
         "includeNamespaces":       { "type": "string" },
@@ -24,6 +32,7 @@
     },
     "watcher": {
       "type": "object",
+      "additionalProperties": false,
       "properties": {
         "enabled":         { "type": "boolean" },
         "sweepIntervalMs": { "type": "string", "pattern": "^[0-9]+$" },
@@ -34,6 +43,7 @@
     "dockerConfigSecret": { "type": "string" },
     "image": {
       "type": "object",
+      "additionalProperties": false,
       "required": ["repository"],
       "properties": {
         "repository": { "type": "string" },
@@ -49,8 +59,11 @@
     "tolerations":        { "type": "array" },
     "affinity":           { "type": "object" },
     "priorityClassName":  { "type": "string" },
+    "nameOverride":       { "type": "string" },
+    "fullnameOverride":   { "type": "string" },
     "serviceAccount": {
       "type": "object",
+      "additionalProperties": false,
       "properties": {
         "create": { "type": "boolean" },
         "name":   { "type": "string" }

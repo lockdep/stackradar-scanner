@@ -1,4 +1,16 @@
 {{- if .Values.watcher.enabled }}
+{{- /*
+The digest, not the tag, selects the image: the reference below renders as
+`repository:tag@digest`, and a digest wins. Overriding only the tag would
+therefore run the chart's pinned image while every `kubectl describe` showed the
+tag the user asked for. Fail instead.
+
+The `.Values.image.tag` term is what keeps this from firing on a chart whose tag
+is the empty default — which is every chart built outside CI.
+*/ -}}
+{{- if and .Values.image.digest .Values.image.tag (ne .Values.image.tag .Chart.AppVersion) }}
+{{- fail (printf "image.tag is set to %q but image.digest (%s) still pins a different image, and the digest wins. To run a different image, clear the digest as well: --set image.tag=%s --set image.digest=\"\"" .Values.image.tag .Values.image.digest .Values.image.tag) }}
+{{- end }}
 {{- $secretName := .Values.stackradar.existingSecret | default (include "stackradar-scanner.fullname" .) }}
 {{- $secretKeyApiKey := .Values.stackradar.existingSecretKeyApiKey | default "api-key" }}
 {{- $secretKeyClusterId := .Values.stackradar.existingSecretKeyClusterId | default "cluster-id" }}

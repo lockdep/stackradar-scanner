@@ -1,3 +1,6 @@
 helm/
 node_modules/
 dist/
+.git/
+.github/
+RELEASING.md

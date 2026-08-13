@@ -6,17 +6,12 @@ metadata:
   labels:
     {{- include "stackradar-scanner.labels" . | nindent 4 }}
 rules:
-  # List and watch pods — list for the batch scanner, watch for the watcher Deployment
+  # Discover running images. `watch` drives the informer; `list` backs both the
+  # informer's initial sync and the periodic sweep. These are the only two verbs
+  # the agent uses — it reads no workload objects of its own.
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["list", "watch"]
-  # Read workload resources to discover all configured images
-  - apiGroups: ["apps"]
-    resources: ["deployments", "statefulsets", "daemonsets"]
-    verbs: ["list"]
-  - apiGroups: ["batch"]
-    resources: ["cronjobs", "jobs"]
-    verbs: ["list"]
   {{- if eq (.Values.scanner.resolveImagePullSecrets | toString) "true" }}
   # Read imagePullSecrets to resolve private registry credentials per workload
   - apiGroups: [""]

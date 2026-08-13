@@ -1,0 +1,270 @@
+name: CI
+
+# Continuous integration for the default branch and pull requests.
+#
+# This workflow never publishes a versioned artifact. Released images and charts
+# come exclusively from release.yaml, triggered by a `v*` tag — see RELEASING.md.
+# What main publishes is a moving `main` image tag for dogfooding and manual
+# testing; it is explicitly not something an external user should depend on.
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+env:
+  IMAGE: ghcr.io/lockdep/stackradar-scanner
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4 # version comes from packageManager in package.json
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck and build
+        run: pnpm run build
+
+      - name: Run tests
+        run: pnpm test
+
+  chart:
+    name: Lint chart
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+
+      # The in-repo chart must stay on the dev placeholder. A hand-edited version
+      # here would be silently overwritten by the release workflow, so catching it
+      # at PR time is cheaper than debugging a mismatched release later.
+      - name: Assert chart version is the dev placeholder
+        run: |
+          set -euo pipefail
+          for field in version appVersion; do
+            actual=$(yq ".${field}" helm/Chart.yaml)
+            if [ "${actual}" != "0.0.0-dev" ]; then
+              echo "::error file=helm/Chart.yaml::${field} is '${actual}', expected '0.0.0-dev'." \
+                   "Versions are stamped from the git tag at release time — do not bump this by hand." \
+                   "See RELEASING.md."
+              exit 1
+            fi
+          done
+
+      # The chart ships its own copy of the terms so they travel with the .tgz,
+      # which the license's Notices section requires. Two copies can drift.
+      - name: Assert chart license matches the repository license
+        run: |
+          set -euo pipefail
+          if ! diff -q LICENSE.md helm/LICENSE.md >/dev/null; then
+            echo "::error file=helm/LICENSE.md::helm/LICENSE.md differs from LICENSE.md." \
+                 "Run: cp LICENSE.md helm/LICENSE.md"
+            diff LICENSE.md helm/LICENSE.md || true
+            exit 1
+          fi
+
+      # CHANGELOG.md is chart metadata: the release workflow publishes the
+      # section matching the tag as the GitHub Release notes and as the chart's
+      # artifacthub.io/changes annotation. A `###` heading that is not an
+      # ArtifactHub change kind still publishes, silently relabelled — which is
+      # exactly the kind of thing nobody notices until it is on ArtifactHub.
+      - name: Validate CHANGELOG.md
+        run: python3 .github/scripts/changelog.py --check
+
+      - name: Lint chart
+        run: helm lint helm/ --strict
+
+      # Render the permutations that exercise the conditional branches in the
+      # templates, so a broken `{{- if }}` surfaces here rather than at install.
+      - name: Render templates
+        run: |
+          set -euo pipefail
+          render() {
+            echo "--- helm template $* ---"
+            helm template stackradar-scanner helm/ --namespace stackradar "$@" >/dev/null
+          }
+          render --set stackradar.clusterId=test --set stackradar.apiKey=test
+          render --set stackradar.existingSecret=my-secret
+          render --set stackradar.existingSecret=my-secret --set dockerConfigSecret=regcred
+          render --set stackradar.existingSecret=my-secret --set scanner.includeNamespaces=default
+          render --set stackradar.existingSecret=my-secret --set watcher.enabled=false
+          render --set stackradar.existingSecret=my-secret \
+                 --set stackradar.existingSecretKeyApiKey=key \
+                 --set stackradar.existingSecretKeyClusterId=id
+          render --set stackradar.existingSecret=my-secret \
+                 --set nameOverride=scanner --set fullnameOverride=my-scanner
+          # A released chart: the stamped tag matches appVersion and a digest
+          # pins the bytes. Must render — this is what every customer installs.
+          render --set stackradar.existingSecret=my-secret \
+                 --set image.tag=0.0.0-dev \
+                 --set image.digest=sha256:0000000000000000000000000000000000000000000000000000000000000000
+          # An override that clears the digest along with the tag.
+          render --set stackradar.existingSecret=my-secret \
+                 --set image.tag=1.3.0 \
+                 --set image.digest=
+
+      # The guards below only protect users if they actually reject bad input,
+      # and a guard that silently stops firing is worse than none. Each case
+      # asserts a specific failure, not just "some error happened".
+      - name: Assert the chart rejects input it should reject
+        run: |
+          set -euo pipefail
+
+          # $1 = human description, $2 = expected substring of the error,
+          # rest = helm args that must fail.
+          refute() {
+            local what="$1" expect="$2"; shift 2
+            local out
+            if out=$(helm template stackradar-scanner helm/ --namespace stackradar "$@" 2>&1); then
+              echo "::error::${what}: accepted, expected a failure"
+              exit 1
+            fi
+            if ! printf '%s' "${out}" | grep -qF "${expect}"; then
+              echo "::error::${what}: failed for the wrong reason, expected to see '${expect}'"
+              printf '%s\n' "${out}"
+              exit 1
+            fi
+            echo "ok: ${what}"
+          }
+
+          # Bad values.
+          refute "invalid image.digest" "values don't meet the specifications" \
+            --set stackradar.existingSecret=my-secret \
+            --set image.digest=not-a-digest
+
+          # Bad key names. Without additionalProperties these were accepted and
+          # silently discarded, which is how a dead `scanner.schedule` key
+          # survived in the gitops values for months.
+          refute "unknown nested key" "Additional property schedule is not allowed" \
+            --set stackradar.existingSecret=my-secret \
+            --set scanner.schedule="0 */6 * * *"
+
+          refute "unknown top-level key" "Additional property totallyBogus is not allowed" \
+            --set stackradar.existingSecret=my-secret \
+            --set totallyBogus=1
+
+          # Overriding the tag while a digest is still pinned runs the digest's
+          # image under the wrong label. Must be loud.
+          refute "image.tag overridden with image.digest still set" "clear the digest as well" \
+            --set stackradar.existingSecret=my-secret \
+            --set image.tag=1.3.0 \
+            --set image.digest=sha256:0000000000000000000000000000000000000000000000000000000000000000
+
+      # helm/README.md is generated from README.md.gotmpl and values.yaml. Nothing
+      # else notices when an edit to values.yaml ships with a stale values table,
+      # and that table is the configuration reference customers read.
+      #
+      # The binary is downloaded and checksum-verified rather than installed by a
+      # third-party action: the same argument the Dockerfile makes for syft.
+      - name: Check helm/README.md is up to date
+        env:
+          # renovate: datasource=github-releases depName=norwoodj/helm-docs
+          HELM_DOCS_VERSION: 1.14.2
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp -d)"
+          base="https://github.com/norwoodj/helm-docs/releases/download/v${HELM_DOCS_VERSION}"
+          tarball="helm-docs_${HELM_DOCS_VERSION}_Linux_x86_64.tar.gz"
+
+          curl -sSfL -o "${tmp}/${tarball}"      "${base}/${tarball}"
+          curl -sSfL -o "${tmp}/checksums.txt"   "${base}/checksums.txt"
+          (cd "${tmp}" && grep " ${tarball}\$" checksums.txt | sha256sum -c -)
+          tar -xzf "${tmp}/${tarball}" -C "${tmp}" helm-docs
+
+          "${tmp}/helm-docs" --chart-search-root=helm --template-files=README.md.gotmpl
+
+          if ! git diff --exit-code -- helm/README.md; then
+            echo "::error file=helm/README.md::helm/README.md is out of date." \
+                 "Run: helm-docs --chart-search-root=helm --template-files=README.md.gotmpl"
+            exit 1
+          fi
+
+  image:
+    name: Build image
+    runs-on: ubuntu-latest
+    needs: test
+    permissions:
+      contents: read
+      packages: write
+      id-token: write # cosign keyless signing via GitHub Actions OIDC
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          # Deliberately no semver tags here — those belong to release.yaml.
+          tags: |
+            type=ref,event=pr
+            type=raw,value=main,enable={{is_default_branch}}
+            type=sha,prefix=sha-,format=short
+          labels: |
+            org.opencontainers.image.title=stackradar-scanner
+            org.opencontainers.image.version=0.0.0-dev+${{ github.sha }}
+            org.opencontainers.image.licenses=PolyForm-Shield-1.0.0
+
+      - name: Build and push image
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: true
+          sbom: true
+
+      - name: Install Cosign
+        if: github.event_name != 'pull_request'
+        uses: sigstore/cosign-installer@v3
+
+      # Dev builds are signed too: the dogfood cluster should verify the same way
+      # a customer does, so a signature problem shows up before it ships.
+      - name: Sign image with Cosign (keyless)
+        if: github.event_name != 'pull_request'
+        run: cosign sign --yes "${IMAGE}@${DIGEST}"
+        env:
+          IMAGE: ${{ env.IMAGE }}
+          DIGEST: ${{ steps.build.outputs.digest }}

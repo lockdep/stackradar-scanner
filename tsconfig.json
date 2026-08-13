@@ -9,6 +9,8 @@
     "esModuleInterop": true,
     "skipLibCheck": true
   },
+  // Everything under src/, tests included, is typechecked. Emit is narrower —
+  // see tsconfig.build.json.
   "include": ["src/**/*"],
   "exclude": ["node_modules", "dist"]
 }

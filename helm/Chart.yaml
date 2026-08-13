@@ -5,8 +5,13 @@ description: >-
   generates SBOMs with Syft, and uploads them to StackRadar for continuous
   software supply-chain visibility.
 type: application
-version: 0.1.0
-appVersion: "0.1.0"
+
+# Placeholder. The released version is stamped in by CI from the git tag that
+# triggered the release (`v1.2.3` -> `1.2.3`), so there is nothing to bump by
+# hand here. A chart built off this file without CI is a dev build by
+# construction — never publish it.
+version: 0.0.0-dev
+appVersion: "0.0.0-dev"
 
 home: https://stackradar.io
 sources:
@@ -27,18 +32,26 @@ maintainers:
 
 icon: https://stackradar.io/icon.png
 
+# `artifacthub.io/changes` and the image reference under `artifacthub.io/images`
+# are rewritten by the release workflow from the tag's commit range and the
+# built image digest. The values below are dev placeholders.
 annotations:
   artifacthub.io/category: security
-  artifacthub.io/license: Apache-2.0
+  # Source-available, not open source: use is permitted except to build or run
+  # something that competes with StackRadar. Full terms ship in the chart as
+  # LICENSE.md, as the license's Notices section requires.
+  artifacthub.io/license: PolyForm-Shield-1.0.0
   artifacthub.io/changes: |
     - kind: added
-      description: Initial release
+      description: Development build
   artifacthub.io/links: |
     - name: Documentation
       url: https://docs.stackradar.io
     - name: Support
       url: https://github.com/lockdep/stackradar-scanner/issues
+    - name: License
+      url: https://github.com/lockdep/stackradar-scanner/blob/main/LICENSE.md
   artifacthub.io/images: |
     - name: stackradar-scanner
-      image: ghcr.io/lockdep/stackradar-scanner:0.1.0
+      image: ghcr.io/lockdep/stackradar-scanner:0.0.0-dev
       whitelisted: true

@@ -1,14 +1,15 @@
 {
   "name": "@stackradar/cluster-scanner",
-  "version": "0.1.0",
+  "//version": "Placeholder — stamped by CI from the release tag. See RELEASING.md.",
+  "version": "0.0.0-dev",
   "private": true,
   "type": "module",
+  "packageManager": "pnpm@11.21.0",
   "scripts": {
-    "dev": "LOG_PRETTY=true tsx src/index.ts",
-    "dev:watch": "LOG_PRETTY=true tsx src/watch.ts",
-    "build": "tsc",
-    "start": "node dist/src/index.js",
-    "start:watch": "node dist/src/watch.js",
+    "dev": "LOG_PRETTY=true tsx src/watch.ts",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc --noEmit && tsc -p tsconfig.build.json",
+    "start": "node dist/src/watch.js",
     "test": "vitest run",
     "test:watch": "vitest"
   },

@@ -14,6 +14,12 @@ stackradar:
   # Compatible with sealed-secrets, external-secrets, and SOPS workflows.
   existingSecret: ""
 
+  # -- Key within `existingSecret` holding the API key. Defaults to `api-key` when empty.
+  existingSecretKeyApiKey: ""
+
+  # -- Key within `existingSecret` holding the cluster ID. Defaults to `cluster-id` when empty.
+  existingSecretKeyClusterId: ""
+
 scanner:
   # -- Comma-separated list of namespaces to exclude from scanning.
   excludeNamespaces: "kube-system,kube-public,kube-node-lease"
@@ -62,12 +68,15 @@ image:
   # -- Container image repository.
   repository: ghcr.io/lockdep/stackradar-scanner
 
-  # -- Image tag. Defaults to the chart appVersion when not set.
-  tag: "build-10"
+  # -- Image tag. Defaults to the chart appVersion, which for a released chart is the
+  # release version — leave empty so the chart and the image it deploys stay in lockstep.
+  tag: ""
 
-  # -- Image digest (sha256:...). When set, pins the exact image bytes regardless of tag
-  # and makes the tag purely informational. Populated automatically by CI for each release.
-  digest: "sha256:f7273bdcc508671d24042ea7e104fbbc5caf86830c86529b52d51ce9cb1cec5b"
+  # -- Image digest (sha256:...). Stamped by the release workflow so every published chart
+  # pins the exact image bytes it was tested against, and set empty on dev builds.
+  # The digest wins over the tag: to run a different image you must clear this as well
+  # (`--set image.tag=X --set image.digest=""`), otherwise the tag is cosmetic.
+  digest: ""
 
   # -- Image pull policy.
   pullPolicy: Always
@@ -101,6 +110,13 @@ affinity: {}
 
 # -- PriorityClassName so the scanner yields resources to application pods.
 priorityClassName: ""
+
+# -- Override the chart name used in resource names and labels.
+nameOverride: ""
+
+# -- Override the full name of the chart's resources, replacing the
+# `<release>-<chart>` default entirely.
+fullnameOverride: ""
 
 serviceAccount:
   # -- Create a ServiceAccount for the scanner.

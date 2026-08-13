@@ -13,6 +13,7 @@ import {
     pickPodLabels,
     pickPodAnnotations,
     deriveWorkloadName,
+    loadKubeConfig,
     resolveRegistryAuth,
     buildTempDockerConfig,
     generateSBOM,
@@ -182,8 +183,7 @@ async function main(): Promise<void> {
         sweepIntervalMs: SWEEP_INTERVAL_MS || "disabled",
     }, "StackRadar cluster watcher starting");
 
-    const kc = new k8s.KubeConfig();
-    kc.loadFromCluster();
+    const kc = loadKubeConfig();
     const coreApi = kc.makeApiClient(k8s.CoreV1Api);
 
     await heartbeat();
