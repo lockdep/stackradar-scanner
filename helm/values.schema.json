@@ -53,6 +53,18 @@
         "noProxy":    { "type": "string" }
       }
     },
+    "caBundle": {
+      "type": "object",
+      "additionalProperties": false,
+
+      "$comment": "No minLength on `key`: an empty key with a bundle configured is caught in deployment.yaml, which can say what to do about it. The mutual exclusion of configMapName and secretName is a template guard for the same reason — JSON Schema can express it, but only as a oneOf whose failure message names neither key.",
+
+      "properties": {
+        "configMapName": { "type": "string" },
+        "secretName":    { "type": "string" },
+        "key":           { "type": "string" }
+      }
+    },
     "dockerConfigSecret": { "type": "string" },
     "image": {
       "type": "object",

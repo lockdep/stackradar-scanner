@@ -151,6 +151,17 @@ jobs:
                  --set proxy.httpProxy=http://proxy.corp:8080 \
                  --set proxy.httpsProxy=http://proxy.corp:8443 \
                  --set 'proxy.noProxy=registry.internal\,.corp'
+          # CA bundle: from a ConfigMap, from a Secret, under a non-default
+          # key, and together with a proxy — a TLS-terminating proxy is the
+          # reason the value exists, so that pair has to render.
+          render --set stackradar.existingSecret=my-secret \
+                 --set caBundle.configMapName=corp-ca
+          render --set stackradar.existingSecret=my-secret \
+                 --set caBundle.secretName=corp-ca \
+                 --set caBundle.key=corp-root.pem
+          render --set stackradar.existingSecret=my-secret \
+                 --set caBundle.configMapName=corp-ca \
+                 --set proxy.httpsProxy=http://proxy.corp:8080
           # A released chart: the stamped tag matches appVersion and a digest
           # pins the bytes. Must render — this is what every customer installs.
           render --set stackradar.existingSecret=my-secret \
@@ -193,6 +204,51 @@ jobs:
             fi
           done
           echo "ok: the Kubernetes API bypasses the proxy"
+
+      # The CA bundle has the same two invariants as the proxy — an unset
+      # default that renders nothing, and one thing it must never do. Here that
+      # is dropping the public roots: `SSL_CERT_FILE` replaces Go's trust store
+      # rather than adding to it, so a well-meaning edit that sets it would
+      # leave the agent trusting the customer's CA and no public registry.
+      - name: Assert CA bundle env rendering
+        run: |
+          set -euo pipefail
+
+          out=$(helm template stackradar-scanner helm/ --namespace stackradar \
+                --set stackradar.existingSecret=my-secret)
+          if printf '%s' "${out}" | grep -qE "ca-bundle|CA_CERTS|SSL_CERT"; then
+            echo "::error file=helm/templates/deployment.yaml::the default render mentions a CA bundle;" \
+                 "an unset caBundle must render no volume and no env vars at all"
+            exit 1
+          fi
+          echo "ok: no CA bundle without one configured"
+
+          out=$(helm template stackradar-scanner helm/ --namespace stackradar \
+                --set stackradar.existingSecret=my-secret \
+                --set caBundle.configMapName=corp-ca)
+
+          if printf '%s' "${out}" | grep -q "SSL_CERT_FILE"; then
+            echo "::error file=helm/templates/deployment.yaml::SSL_CERT_FILE is set." \
+                 "It replaces Go's trust store instead of extending it, so syft would" \
+                 "lose the public roots and could no longer pull a public image." \
+                 "Extend SSL_CERT_DIR instead."
+            exit 1
+          fi
+          echo "ok: SSL_CERT_FILE is not set"
+
+          if ! printf '%s' "${out}" | grep -A1 "name: SSL_CERT_DIR$" | grep -q "/etc/ssl/certs"; then
+            echo "::error file=helm/templates/deployment.yaml::SSL_CERT_DIR does not include" \
+                 "/etc/ssl/certs — SSL_CERT_DIR replaces Go's directory list, so omitting the" \
+                 "system directory drops the public roots"
+            exit 1
+          fi
+          if ! printf '%s' "${out}" | grep -A1 "name: NODE_EXTRA_CA_CERTS$" \
+               | grep -q "/etc/ssl/stackradar/ca-certificates.crt"; then
+            echo "::error file=helm/templates/deployment.yaml::NODE_EXTRA_CA_CERTS does not point" \
+                 "at the mounted bundle — the agent's own API traffic would not trust the CA"
+            exit 1
+          fi
+          echo "ok: both runtimes are pointed at the bundle, public roots kept"
 
       # The guards below only protect users if they actually reject bad input,
       # and a guard that silently stops firing is worse than none. Each case
@@ -259,6 +315,20 @@ jobs:
           refute "proxy URL without a scheme" "proxy.httpsProxy.*pattern" \
             --set stackradar.existingSecret=my-secret \
             --set proxy.httpsProxy=proxy.corp:8080
+
+          # Two sources for one bundle is ambiguous, and picking one silently
+          # means a CA that never reaches the pod.
+          refute "caBundle from both a ConfigMap and a Secret" "both set" \
+            --set stackradar.existingSecret=my-secret \
+            --set caBundle.configMapName=corp-ca \
+            --set caBundle.secretName=corp-ca
+
+          # An empty key would render an item with no key, which the API server
+          # rejects far from where the mistake was made.
+          refute "caBundle.key emptied" "caBundle.key is empty" \
+            --set stackradar.existingSecret=my-secret \
+            --set caBundle.configMapName=corp-ca \
+            --set caBundle.key=
 
           # Overriding the tag while a digest is still pinned runs the digest's
           # image under the wrong label. Must be loud.

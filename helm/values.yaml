@@ -85,6 +85,24 @@ proxy:
   # is always appended, so list only your own internal registries here.
   noProxy: ""
 
+caBundle:
+  # -- Name of a ConfigMap holding additional CA certificates to trust, for clusters
+  # behind a TLS-intercepting proxy. The object must hold a PEM bundle under
+  # `caBundle.key`; it is mounted read-only and added to the trust store of both
+  # runtimes in the image. Mutually exclusive with `caBundle.secretName` — setting
+  # both fails the render rather than silently picking one.
+  configMapName: ""
+
+  # -- Name of a Secret holding the same thing, for workflows that keep the bundle in
+  # a Secret. A CA certificate is public by nature, so a ConfigMap is the usual home;
+  # this exists because external-secrets and SOPS pipelines deliver everything as
+  # Secrets.
+  secretName: ""
+
+  # -- Key within the ConfigMap or Secret holding the PEM bundle. Only this one key is
+  # mounted, so unrelated keys in the same object are not exposed to the pod.
+  key: "ca-certificates.crt"
+
 # -- Name of a `kubernetes.io/dockerconfigjson` Secret to mount as a docker config,
 # allowing syft to pull from private registries.
 # Create with: `kubectl create secret generic registry-credentials --from-file=.dockerconfigjson=...`

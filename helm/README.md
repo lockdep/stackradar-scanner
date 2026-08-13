@@ -108,7 +108,48 @@ Leaving both URLs empty renders no environment variables at all, which is what
 every install that does not need a proxy gets.
 
 If your proxy terminates TLS — most do — the agent also needs to trust its CA.
-That is not yet configurable in this chart.
+See the next section.
+
+## Behind a TLS-intercepting proxy
+
+An egress proxy that terminates and re-signs TLS presents a certificate from
+your own CA. Nothing in the pod trusts it yet, so the agent fails with
+`unable to verify the first certificate` or
+`self-signed certificate in certificate chain`. Give it the CA:
+
+```bash
+kubectl create configmap stackradar-ca \
+  --namespace stackradar \
+  --from-file=ca-certificates.crt=/path/to/your-ca.crt
+
+helm upgrade stackradar-scanner oci://ghcr.io/lockdep/charts/stackradar-scanner \
+  --version <version> \
+  --namespace stackradar --reuse-values \
+  --set caBundle.configMapName=stackradar-ca
+```
+
+The file may hold one PEM certificate or several concatenated — an intermediate
+plus its root, say. Name it whatever you like and point `caBundle.key` at it;
+`ca-certificates.crt` is only the default. If your tooling delivers certificates
+as Secrets, `caBundle.secretName` takes one instead. Setting both fails the
+install rather than quietly picking one.
+
+**Your CA is added to the public roots, not substituted for them.** The bundle
+is mounted read-only at `/etc/ssl/stackradar/` and the pod gets
+`NODE_EXTRA_CA_CERTS` (Node — the agent's own API and Kubernetes traffic) and
+`SSL_CERT_DIR` (Go — syft's registry pulls). Both extend the trust store the
+image already has, so a cluster that pulls some images through the intercepting
+proxy and others straight from a public registry keeps working. That is why the
+chart does not set `SSL_CERT_FILE`: it *replaces* Go's roots instead of adding
+to them, and syft would lose every public registry the moment you mounted a CA.
+Concatenating the system bundle into your own is therefore unnecessary.
+
+The certificate has to arrive as a mount. The pod runs with a read-only root
+filesystem, so nothing can write into `/etc/ssl/certs` at runtime, and an init
+container running `update-ca-certificates` has nowhere to put the result.
+
+Leave both names empty — the default — and no volume and no environment
+variables are rendered at all.
 
 ## Verifying the release
 
@@ -182,6 +223,9 @@ See [RELEASING.md](https://github.com/lockdep/stackradar-scanner/blob/main/RELEA
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | affinity | object | `{}` | Affinity rules for fine-grained pod placement. |
+| caBundle.configMapName | string | `""` | Name of a ConfigMap holding additional CA certificates to trust, for clusters behind a TLS-intercepting proxy. The object must hold a PEM bundle under `caBundle.key`; it is mounted read-only and added to the trust store of both runtimes in the image. Mutually exclusive with `caBundle.secretName` — setting both fails the render rather than silently picking one. |
+| caBundle.key | string | `"ca-certificates.crt"` | Key within the ConfigMap or Secret holding the PEM bundle. Only this one key is mounted, so unrelated keys in the same object are not exposed to the pod. |
+| caBundle.secretName | string | `""` | Name of a Secret holding the same thing, for workflows that keep the bundle in a Secret. A CA certificate is public by nature, so a ConfigMap is the usual home; this exists because external-secrets and SOPS pipelines deliver everything as Secrets. |
 | dockerConfigSecret | string | `""` | Name of a `kubernetes.io/dockerconfigjson` Secret to mount as a docker config, allowing syft to pull from private registries. Create with: `kubectl create secret generic registry-credentials --from-file=.dockerconfigjson=...` |
 | fullnameOverride | string | `""` | Override the full name of the chart's resources, replacing the `<release>-<chart>` default entirely. |
 | image.digest | string | `""` | Image digest (sha256:...). Stamped by the release workflow so every published chart pins the exact image bytes it was tested against, and set empty on dev builds. The digest wins over the tag: to run a different image you must clear this as well (`--set image.tag=X --set image.digest=""`), otherwise the tag is cosmetic. |

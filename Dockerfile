@@ -73,6 +73,12 @@ FROM node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a55
 
 # syft is a static Go binary, but it uses the system trust store rather than a
 # bundled one, so it needs ca-certificates to reach registries over TLS.
+#
+# The chart's `caBundle` values depend on this staying true: they add a private
+# CA by extending the trust store (`SSL_CERT_DIR` for syft, `NODE_EXTRA_CA_CERTS`
+# for Node) rather than replacing it, so removing this package would take the
+# public roots with it and leave a cluster behind a TLS-intercepting proxy able
+# to reach its own registry and nothing else.
 RUN apk add --no-cache ca-certificates
 COPY --from=syft /usr/local/bin/syft /usr/local/bin/syft
 

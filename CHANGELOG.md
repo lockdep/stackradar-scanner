@@ -32,6 +32,22 @@ Removed, Fixed, Security — so use those six and nothing else.
   pull. The agent logs a warning naming the Secret and the namespace and
   finishes the rest of the scan.
 
+- `caBundle.configMapName`, `caBundle.secretName` and `caBundle.key` — trust a
+  private CA, for clusters behind a proxy that terminates and re-signs TLS.
+  Point one of the first two at a ConfigMap or Secret holding a PEM bundle and
+  it is mounted read-only at `/etc/ssl/stackradar/`; the pod gets
+  `NODE_EXTRA_CA_CERTS` for the agent's own traffic and `SSL_CERT_DIR` for
+  syft's registry pulls. Without it the agent fails with `unable to verify the
+  first certificate` and the only workaround was to turn certificate
+  verification off entirely.
+
+  Your CA is *added* to the public roots rather than replacing them, so images
+  pulled straight from a public registry keep working alongside those that go
+  through the proxy. `caBundle.key` names the key inside the object and defaults
+  to `ca-certificates.crt`. Setting both a ConfigMap and a Secret fails the
+  install instead of picking one. Both are empty by default and render no
+  volume and no environment variables, so nothing changes for existing installs.
+
 - `proxy.httpProxy`, `proxy.httpsProxy` and `proxy.noProxy` — run the scanner in
   a cluster with no direct internet egress. Setting either URL puts
   `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` on the pod in both upper and lower
@@ -51,8 +67,8 @@ Removed, Fixed, Security — so use those six and nothing else.
   `user:pass@` redacted. Both URLs are empty by default and render no
   environment variables at all, so nothing changes for existing installs.
 
-  If your proxy also terminates TLS, the agent needs to trust its CA — that is
-  not configurable yet.
+  If your proxy also terminates TLS, point `caBundle.configMapName` at its CA —
+  see the entry below.
 
 ### Changed
 

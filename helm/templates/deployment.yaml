@@ -11,6 +11,26 @@ is the empty default — which is every chart built outside CI.
 {{- if and .Values.image.digest .Values.image.tag (ne .Values.image.tag .Chart.AppVersion) }}
 {{- fail (printf "image.tag is set to %q but image.digest (%s) still pins a different image, and the digest wins. To run a different image, clear the digest as well: --set image.tag=%s --set image.digest=\"\"" .Values.image.tag .Values.image.digest .Values.image.tag) }}
 {{- end }}
+{{- /*
+One bundle, from one object. Preferring the ConfigMap silently would mean a
+cluster whose Secret-borne CA never reaches the pod, diagnosed as "the CA does
+not work" rather than "the chart ignored it" — the same argument as the
+tag/digest conflict above.
+*/ -}}
+{{- if and .Values.caBundle.configMapName .Values.caBundle.secretName }}
+{{- fail (printf "caBundle.configMapName (%s) and caBundle.secretName (%s) are both set, and the bundle can only come from one of them. Clear whichever one you do not want." .Values.caBundle.configMapName .Values.caBundle.secretName) }}
+{{- end }}
+{{- $caBundleSource := or .Values.caBundle.configMapName .Values.caBundle.secretName }}
+{{- if and $caBundleSource (not .Values.caBundle.key) }}
+{{- fail (printf "caBundle.key is empty, so the chart does not know which key of %q holds the PEM bundle. Set it to the key name, or leave it at the default \"ca-certificates.crt\"." $caBundleSource) }}
+{{- end }}
+{{- /*
+The bundle is mounted under a directory of its own and never over
+`/etc/ssl/certs`: a volume mounted there would shadow the image's own trust
+store, and the agent would trust the private CA and nothing else.
+*/ -}}
+{{- $caBundleDir := "/etc/ssl/stackradar" }}
+{{- $caBundlePath := printf "%s/ca-certificates.crt" $caBundleDir }}
 {{- $secretName := .Values.stackradar.existingSecret | default (include "stackradar-scanner.fullname" .) }}
 {{- $secretKeyApiKey := .Values.stackradar.existingSecretKeyApiKey | default "api-key" }}
 {{- $secretKeyClusterId := .Values.stackradar.existingSecretKeyClusterId | default "cluster-id" }}
@@ -50,6 +70,23 @@ spec:
       volumes:
         - name: tmp
           emptyDir: {}
+        {{- if $caBundleSource }}
+        - name: ca-bundle
+          {{- if .Values.caBundle.configMapName }}
+          configMap:
+            name: {{ .Values.caBundle.configMapName }}
+          {{- else }}
+          secret:
+            secretName: {{ .Values.caBundle.secretName }}
+          {{- end }}
+            # Only the named key is projected, under a fixed filename: the env
+            # vars below then point at a stable path whatever the key is called,
+            # and no other key of the object lands in a directory the trust
+            # store reads.
+            items:
+              - key: {{ .Values.caBundle.key }}
+                path: ca-certificates.crt
+        {{- end }}
         {{- if .Values.dockerConfigSecret }}
         - name: docker-config
           secret:
@@ -122,6 +159,24 @@ spec:
               value: /home/node/.docker
             {{- end }}
             {{- /*
+            Two runtimes, two trust stores, and they do not read the same
+            variable. `NODE_EXTRA_CA_CERTS` appends to the roots Node ships
+            with. Go — syft — takes its roots from a list of files and a list of
+            directories, and each of `SSL_CERT_FILE` and `SSL_CERT_DIR`
+            *replaces* one of those lists rather than adding to it. So
+            `SSL_CERT_DIR` names our directory and the system one, and
+            `SSL_CERT_FILE` is deliberately not set: pointing it at the bundle
+            would drop the public roots the moment the image's own
+            `/etc/ssl/certs` stopped being a directory of individual certs, and
+            syft could no longer pull a public image.
+            */ -}}
+            {{- if $caBundleSource }}
+            - name: NODE_EXTRA_CA_CERTS
+              value: {{ $caBundlePath | quote }}
+            - name: SSL_CERT_DIR
+              value: {{ printf "%s:/etc/ssl/certs" $caBundleDir | quote }}
+            {{- end }}
+            {{- /*
             Both spellings of every variable: syft reads the upper-case ones,
             plenty of tooling reads only the lower-case ones, and a cluster
             where the agent silently bypasses the proxy is the failure this
@@ -153,6 +208,11 @@ spec:
             {{- if .Values.dockerConfigSecret }}
             - name: docker-config
               mountPath: /home/node/.docker
+              readOnly: true
+            {{- end }}
+            {{- if $caBundleSource }}
+            - name: ca-bundle
+              mountPath: {{ $caBundleDir }}
               readOnly: true
             {{- end }}
 

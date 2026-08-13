@@ -158,6 +158,13 @@ Where that egress goes through a corporate proxy, set `proxy.httpsProxy` (see
 [Behind a corporate proxy](helm/README.md#behind-a-corporate-proxy)). Kubernetes
 API traffic is exempted from the proxy automatically and stays in the cluster.
 
+Where that proxy also terminates TLS, point `caBundle.configMapName` at a
+ConfigMap holding your CA (see
+[Behind a TLS-intercepting proxy](helm/README.md#behind-a-tls-intercepting-proxy)).
+It is mounted read-only and *added* to the public roots, so the agent keeps
+verifying every certificate it is presented — including the ones it uploads
+your SBOM data over.
+
 ## Verifying what you install
 
 Every release is signed with [cosign](https://docs.sigstore.dev/) keyless
