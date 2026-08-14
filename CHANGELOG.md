@@ -18,8 +18,6 @@ Removed, Fixed, Security — so use those six and nothing else.
 
 ## [Unreleased]
 
-## [0.1.2] - 2026-08-14
-
 ### Added
 
 - Workload inventory reporting. Within seconds of starting, the agent now tells
@@ -35,6 +33,10 @@ Removed, Fixed, Security — so use those six and nothing else.
   same pod informer the agent already runs — and a control plane too old to
   accept the report is not an error: the agent notices the 404 and carries on
   scanning.
+
+## [0.1.2] - 2026-08-14
+
+### Added
 
 - `networkPolicy.enabled` and `networkPolicy.egress` — a NetworkPolicy for the
   scanner pod, so what the agent can reach is an object you can read with
