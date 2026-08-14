@@ -20,9 +20,11 @@ import {
     buildTempDockerConfig,
     generateSBOM,
     Semaphore,
+    podImages,
+    buildInventory,
     ImageInfo,
 } from "./lib/scan.js";
-import { heartbeat, checkExistingSbom, uploadSBOM } from "./lib/client.js";
+import { heartbeat, checkExistingSbom, uploadSBOM, reportInventory } from "./lib/client.js";
 import { configureProxy } from "./lib/proxy.js";
 import {
     HEALTH_PORT,
@@ -46,9 +48,8 @@ const SWEEP_INTERVAL_MS = parseInt(process.env.SWEEP_INTERVAL_MS ?? "21600000", 
 // 5 minutes default; ensures scanner_last_seen_at stays fresh even when no new images appear
 const HEARTBEAT_INTERVAL_MS = parseInt(process.env.HEARTBEAT_INTERVAL_MS ?? "300000", 10);
 
-// Keyed by `${digest}::${namespace}::${containerName}` to avoid re-scanning
-// the same running container across informer re-syncs or pod restarts with
-// the same image binary. Bounded to prevent unbounded memory growth.
+// Insertion-ordered set that evicts its oldest member at capacity, so the
+// scan dedup keys below cannot grow without bound.
 class BoundedSet<T> {
     private map = new Map<T, undefined>();
     constructor(private maxSize: number) {}
@@ -69,71 +70,29 @@ const sem = new Semaphore(CONCURRENT_SCANS);
 // ─── Pod handler ─────────────────────────────────────────────────────────────
 
 async function handlePod(pod: k8s.V1Pod, coreApi: k8s.CoreV1Api): Promise<void> {
-    const namespace = pod.metadata?.namespace ?? "default";
-    if (!shouldScan(namespace)) return;
-
-    const phase = pod.status?.phase;
-    if (phase !== "Running" && phase !== "Succeeded" && phase !== "Failed") return;
-
-    const allStatuses = [
-        ...(pod.status?.containerStatuses ?? []),
-        ...(pod.status?.initContainerStatuses ?? []),
-    ];
-
-    for (const cs of allStatuses) {
-        const isActive = cs.state?.running || cs.state?.terminated;
-        if (!cs.imageID || !isActive) continue;
-
-        // Ahead of the dedup key and everything after it: an excluded image
-        // costs nothing at all, not even a slot in `seenDigests`. Matched on
-        // `cs.image` — the reference the pod spec asked for, which is what the
-        // patterns are written against — rather than on the resolved
-        // `imageID`, which for many runtimes is a bare digest with no name in
-        // it to match.
-        if (!shouldScanImage(cs.image ?? "")) {
-            log.debug(
-                { image: cs.image, namespace, container: cs.name },
-                "image excluded by EXCLUDE_IMAGES, skipping"
-            );
-            continue;
-        }
-
-        const normalized = cs.imageID.replace(/^docker-pullable:\/\//, "");
-        const digestMatch = normalized.match(/sha256:[a-f0-9]{64}/);
-        if (!digestMatch) continue;
-        const digest = digestMatch[0];
-
-        const dedupKey = `${digest}::${namespace}::${cs.name}`;
+    for (const info of podImages(pod)) {
+        // Keyed by `${digest}::${namespace}::${containerName}` to avoid
+        // re-scanning the same running container across informer re-syncs or
+        // pod restarts with the same image binary.
+        const dedupKey = `${info.digest}::${info.namespace}::${info.containerName}`;
         if (seenDigests.has(dedupKey)) continue;
         seenDigests.add(dedupKey);
-
-        const pullRef = normalized.includes("@sha256:")
-            ? normalized
-            : `${cs.image}@${digest}`;
-
-        const rawLabels = pod.metadata?.labels;
-        const workloadName = deriveWorkloadName(pod.metadata?.name ?? "", rawLabels);
-        const pullSecrets = (pod.spec?.imagePullSecrets ?? [])
-            .map((s) => s.name)
-            .filter((n): n is string => Boolean(n));
-
-        const info: ImageInfo = {
-            pullRef,
-            displayName: cs.image ?? pullRef,
-            digest,
-            namespace,
-            workloadName,
-            containerName: cs.name ?? workloadName,
-            workloadKind: "Pod",
-            podLabels: pickPodLabels(rawLabels),
-            podAnnotations: pickPodAnnotations(pod.metadata?.annotations),
-            imagePullSecrets: pullSecrets,
-        };
 
         // Fire-and-forget — concurrency controlled by Semaphore
         scanImage(info, coreApi).catch((err) =>
             log.error({ image: info.displayName, err: err instanceof Error ? err.message : String(err) }, "unexpected scan error")
         );
+    }
+}
+
+// ─── Inventory ───────────────────────────────────────────────────────────────
+
+/** Best-effort: a failed report costs a progress indicator, never a scan. */
+async function publishInventory(pods: readonly k8s.V1Pod[]): Promise<void> {
+    try {
+        await reportInventory(buildInventory(pods));
+    } catch (err) {
+        log.warn({ err: err instanceof Error ? err.message : String(err) }, "inventory report failed");
     }
 }
 
@@ -280,10 +239,19 @@ async function main(): Promise<void> {
 
     await startInformer(informer);
 
+    /* The informer's initial list has completed by the time `start()` resolves,
+       so its cache is the whole cluster. Reporting it here is what turns the
+       first minutes — image pull plus syft, before any SBOM exists — from a
+       blank screen into a count that fills in. */
+    await publishInventory(informer.list());
+
     setInterval(() => {
         heartbeat().catch((err) =>
             log.warn({ err: err instanceof Error ? err.message : String(err) }, "heartbeat failed")
         );
+        // Same cadence, because the report is a full set replacement and this
+        // is how a scaled-down or deleted workload leaves the inventory.
+        void publishInventory(informer.list());
     }, HEARTBEAT_INTERVAL_MS);
 
     if (SWEEP_INTERVAL_MS > 0) {

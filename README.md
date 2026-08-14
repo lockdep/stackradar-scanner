@@ -132,6 +132,15 @@ The allowlists are literal `Set`s in
 `RELEVANT_POD_ANNOTATION_KEYS`) — a label or annotation not named there is
 dropped before anything is sent.
 
+Separately, on startup and then on the heartbeat interval, the agent sends a
+**workload inventory**: for every container it would scan, its namespace,
+workload name, container name, image reference and digest — the identity fields
+above and nothing else. No labels, no annotations, and no SBOM, because none has
+been generated yet. It is what lets StackRadar show you "47 workloads
+discovered, 6 scanned" while the remaining images are still being pulled, and it
+is filtered by exactly the same namespace and image rules as scanning, so
+anything you exclude never appears in it either.
+
 ### What does not leave your cluster
 
 - **Registry credentials.** Resolved `imagePullSecrets` are written to a

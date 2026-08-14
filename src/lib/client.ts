@@ -1,5 +1,5 @@
 import * as fs from "fs";
-import { API_URL, API_KEY, SCANNER_VERSION, CLUSTER_NAME, CLUSTER_ID } from "./scan.js";
+import { API_URL, API_KEY, SCANNER_VERSION, CLUSTER_NAME, CLUSTER_ID, type InventoryWorkload } from "./scan.js";
 import { log } from "./logger.js";
 import { recordHeartbeatOk, recordHeartbeatFailure } from "./health.js";
 
@@ -188,4 +188,48 @@ export async function uploadSBOM(
         const text = await response.text();
         throw new Error(`HTTP ${response.status}: ${text}`);
     }
+}
+
+// ─── Inventory ───────────────────────────────────────────────────────────────
+
+// Defined beside `buildInventory`, which is what produces it.
+export type { InventoryWorkload };
+
+/**
+ * Reports every workload currently running, ahead of scanning any of them.
+ *
+ * The informer knows the whole cluster within seconds of startup, while image
+ * pull plus syft takes minutes for a large fleet — this is what lets the
+ * Dashboard show "47 discovered, 6 scanned, 41 in progress" instead of nothing
+ * at all until the first SBOM lands.
+ *
+ * The report is the complete set, not a delta: the server replaces the
+ * cluster's inventory with it, which is also how a removed workload disappears.
+ * Failures are the caller's to log and drop — an inventory report is a progress
+ * hint, and must never take down a scanner that is otherwise scanning fine.
+ */
+export async function reportInventory(workloads: InventoryWorkload[]): Promise<void> {
+    const url = `${API_URL}/v1/inventory`;
+    const response = await fetchWithRetry(url, {
+        method: "POST",
+        headers: {
+            "Content-Type": "application/json",
+            "X-API-Key": API_KEY!,
+        },
+        body: JSON.stringify({ workloads }),
+    });
+
+    // A control plane older than this scanner has no such route. Scanners and
+    // the server are released independently, so that is a normal deployment
+    // state and not something to warn about on every interval.
+    if (response.status === 404) {
+        log.debug("inventory endpoint not available on this control plane, skipping");
+        return;
+    }
+
+    if (!response.ok) {
+        throw new Error(`HTTP ${response.status}: ${await response.text()}`);
+    }
+
+    log.info({ workloads: workloads.length }, "inventory reported");
 }

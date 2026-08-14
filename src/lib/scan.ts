@@ -402,3 +402,114 @@ export async function generateSBOM(pullRef: string, dockerConfigDir?: string): P
     return tmpFile;
 }
 
+
+// ─── Pod inspection ──────────────────────────────────────────────────────────
+
+/**
+ * Every container in a pod that this scanner is configured to care about.
+ *
+ * Split out of `handlePod` so the inventory report and the scan queue are
+ * derived from exactly the same rule. Any drift between them would show up in
+ * the UI as a "discovered" count that never finishes converging on "scanned".
+ */
+export function podImages(pod: k8s.V1Pod): ImageInfo[] {
+    const namespace = pod.metadata?.namespace ?? "default";
+    if (!shouldScan(namespace)) return [];
+
+    const phase = pod.status?.phase;
+    if (phase !== "Running" && phase !== "Succeeded" && phase !== "Failed") return [];
+
+    const allStatuses = [
+        ...(pod.status?.containerStatuses ?? []),
+        ...(pod.status?.initContainerStatuses ?? []),
+    ];
+
+    const images: ImageInfo[] = [];
+
+    for (const cs of allStatuses) {
+        const isActive = cs.state?.running || cs.state?.terminated;
+        if (!cs.imageID || !isActive) continue;
+
+        // Ahead of the dedup key and everything after it: an excluded image
+        // costs nothing at all, not even a slot in `seenDigests`. Matched on
+        // `cs.image` — the reference the pod spec asked for, which is what the
+        // patterns are written against — rather than on the resolved
+        // `imageID`, which for many runtimes is a bare digest with no name in
+        // it to match.
+        if (!shouldScanImage(cs.image ?? "")) {
+            log.debug(
+                { image: cs.image, namespace, container: cs.name },
+                "image excluded by EXCLUDE_IMAGES, skipping"
+            );
+            continue;
+        }
+
+        const normalized = cs.imageID.replace(/^docker-pullable:\/\//, "");
+        const digestMatch = normalized.match(/sha256:[a-f0-9]{64}/);
+        if (!digestMatch) continue;
+        const digest = digestMatch[0];
+
+        const pullRef = normalized.includes("@sha256:")
+            ? normalized
+            : `${cs.image}@${digest}`;
+
+        const rawLabels = pod.metadata?.labels;
+        const workloadName = deriveWorkloadName(pod.metadata?.name ?? "", rawLabels);
+        const pullSecrets = (pod.spec?.imagePullSecrets ?? [])
+            .map((s) => s.name)
+            .filter((n): n is string => Boolean(n));
+
+        images.push({
+            pullRef,
+            displayName: cs.image ?? pullRef,
+            digest,
+            namespace,
+            workloadName,
+            containerName: cs.name ?? workloadName,
+            workloadKind: "Pod",
+            podLabels: pickPodLabels(rawLabels),
+            podAnnotations: pickPodAnnotations(pod.metadata?.annotations),
+            imagePullSecrets: pullSecrets,
+        });
+    }
+
+    return images;
+}
+
+// ─── Inventory ───────────────────────────────────────────────────────────────
+
+/**
+ * One container the informer can see. Named the same way the SBOM upload names
+ * it, so the control plane can line a discovered workload up with the project
+ * it becomes.
+ */
+export interface InventoryWorkload {
+    namespace: string;
+    workloadName: string;
+    containerName: string;
+    imageRef: string;
+    imageDigest?: string | undefined;
+}
+
+/**
+ * Collapses the informer's pod cache into one entry per workload container —
+ * the same identity a `projects` row gets on upload, so ten replicas of a
+ * Deployment are one discovered workload rather than ten.
+ */
+export function buildInventory(pods: readonly k8s.V1Pod[]): InventoryWorkload[] {
+    const byIdentity = new Map<string, InventoryWorkload>();
+    for (const pod of pods) {
+        for (const info of podImages(pod)) {
+            const key = `${info.namespace}\u0000${info.workloadName}\u0000${info.containerName}`;
+            if (byIdentity.has(key)) continue;
+            byIdentity.set(key, {
+                namespace: info.namespace,
+                workloadName: info.workloadName,
+                containerName: info.containerName,
+                imageRef: info.pullRef,
+                imageDigest: info.digest,
+            });
+        }
+    }
+    return [...byIdentity.values()];
+}

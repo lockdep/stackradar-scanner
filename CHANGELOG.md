@@ -22,6 +22,20 @@ Removed, Fixed, Security — so use those six and nothing else.
 
 ### Added
 
+- Workload inventory reporting. Within seconds of starting, the agent now tells
+  StackRadar every workload it can see — namespace, name, container and image
+  reference — before it has pulled or scanned any of them. It repeats the report
+  on the heartbeat interval (`HEARTBEAT_INTERVAL_MS`, 5 minutes by default), and
+  each report is the complete picture, so a workload you scale to zero leaves
+  the list on the next one.
+
+  This is what turns the first few minutes after `helm install` from a blank
+  dashboard into "47 workloads discovered, 6 scanned, 41 generating SBOMs".
+  Nothing is scanned to produce it, no new RBAC is needed — it comes from the
+  same pod informer the agent already runs — and a control plane too old to
+  accept the report is not an error: the agent notices the 404 and carries on
+  scanning.
+
 - `networkPolicy.enabled` and `networkPolicy.egress` — a NetworkPolicy for the
   scanner pod, so what the agent can reach is an object you can read with
   `kubectl get networkpolicy` rather than a paragraph in our README. Ingress is
