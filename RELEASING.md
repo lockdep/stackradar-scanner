@@ -18,24 +18,47 @@ Release carrying the digests and verification instructions.
 
 ## Cutting a release
 
-First the changelog. Move the `## [Unreleased]` entries in `CHANGELOG.md` under
-a heading for the version you are about to tag, date it, and land that commit on
-`main`:
+Run the **Cut release** workflow from the Actions tab and choose `patch`,
+`minor` or `major`. From a terminal that is:
 
-```markdown
-## [1.2.3] - 2026-08-13
+```bash
+gh workflow run cut-release.yaml -f bump=minor
 ```
 
-The release workflow reads exactly that section and uses it twice: as the
-GitHub Release notes, and as the chart's `artifacthub.io/changes` annotation.
-It is what a user sees on the releases page and on ArtifactHub when deciding
-whether to upgrade, so write it for them.
+Choosing which of the three it is (see below) is the whole of the decision. The
+workflow does the rest:
 
-A tag with no matching section still releases — the notes fall back to the
-commit subjects in the tag's range — but the run carries a warning, because
-commit subjects are written for us, not for the people running the chart.
+1. works out the number from the tags that already exist — `v0.1.1` plus a
+   `minor` is `0.2.0` — and refuses a version that has been released;
+2. moves the `## [Unreleased]` entries in `CHANGELOG.md` under
+   `## [0.2.0] - <today>`, updates the compare links at the foot of the file,
+   and commits that to `main`;
+3. tags that commit `v0.2.0` and starts the release workflow on it.
 
-Then tag:
+Nothing needs preparing first. The changelog is written in the pull requests
+that change things, under `## [Unreleased]`; cutting a release is what gives
+those entries a version. A release whose Unreleased section is empty fails
+instead of shipping notes nobody wrote, because that section is read twice —
+as the GitHub Release notes and as the chart's `artifacthub.io/changes`
+annotation — and is what a user sees when deciding whether to upgrade.
+
+To see the version and the changelog diff without publishing anything:
+
+```bash
+gh workflow run cut-release.yaml -f bump=minor -f dry_run=true
+```
+
+Then watch the release itself:
+
+```bash
+gh run watch "$(gh run list --workflow=release.yaml --limit 1 --json databaseId --jq '.[0].databaseId')"
+```
+
+### Tagging by hand
+
+The tag is still the only thing that matters, so releasing without the workflow
+is releasing normally — write the `## [1.2.3]` section yourself, land it on
+`main`, then:
 
 ```bash
 git checkout main && git pull
@@ -43,11 +66,11 @@ git tag -a v1.2.3 -m "v1.2.3"
 git push origin v1.2.3
 ```
 
-That is the rest of it. Watch the run:
-
-```bash
-gh run watch "$(gh run list --workflow=release.yaml --limit 1 --json databaseId --jq '.[0].databaseId')"
-```
+A tag pushed from a laptop starts the release workflow through its `push`
+trigger. A tag with no matching changelog section still releases — the notes
+fall back to the commit subjects in the tag's range — but the run carries a
+warning, because commit subjects are written for us, not for the people running
+the chart.
 
 ### Choosing the number
 
@@ -71,9 +94,20 @@ nothing else: no `latest`, no rolling `1.2` alias, and the GitHub Release is
 marked as a prerelease. Users only get it by asking for it by name, so it is
 safe to cut one for testing.
 
-Its notes come from the `## [1.2.3]` section — a release candidate rehearses a
-version, so it ships the notes that version will ship with. There is no need to
-add a section per candidate.
+Same workflow, with an identifier — the counter is appended and continues from
+whatever candidate exists, so running this twice gives `rc.1` then `rc.2`:
+
+```bash
+gh workflow run cut-release.yaml -f bump=minor -f prerelease=rc
+```
+
+A candidate does not consume the version and does not touch `CHANGELOG.md`. The
+number is always computed from the last *stable* tag, so the `minor` release cut
+after `v1.2.0-rc.2` is `1.2.0` itself, and its notes are the entries that were
+under `## [Unreleased]` all along. A candidate takes those same notes from a
+`## [1.2.0]` section if one exists yet, and otherwise falls back to commit
+subjects — a release candidate rehearses a version rather than being one, so
+there is no section to add per candidate.
 
 ## Released versions are immutable
 
@@ -86,8 +120,19 @@ signature and digest a user has already recorded, and give two people running
 If a release is wrong, cut the next patch version. Do not delete and re-push a
 tag that has already been released.
 
-If a release run fails *before* it pushed anything, delete the tag and re-push
-it:
+If a release run fails *before* it pushed anything — a flaky runner, a GHCR
+outage — the tag is fine and only the run needs repeating:
+
+```bash
+gh workflow run release.yaml --ref v1.2.3
+```
+
+If the tag itself is wrong (cut from the wrong commit, wrong number), delete it
+and cut again. The changelog commit it came with stays on `main`, and cutting
+the same number a second time reuses the section already written rather than
+writing it twice. Only if new entries have landed under `## [Unreleased]` since
+does it stop, because merging them into a section that already exists is a
+judgement call rather than an edit.
 
 ```bash
 git push --delete origin v1.2.3

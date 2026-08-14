@@ -4,11 +4,18 @@ name: Release
 # chart. The git tag is the single source of truth for the version: `v1.2.3`
 # produces image `1.2.3` and chart `1.2.3` with appVersion `1.2.3`. Nothing in
 # the repository needs to be version-bumped by hand — see RELEASING.md.
+#
+# Tags are normally created by the Cut release workflow rather than by hand.
 
 on:
   push:
     tags:
       - "v*"
+  # cut-release.yaml pushes its tag with GITHUB_TOKEN, and a push made with that
+  # token raises no push event, so it starts this workflow explicitly instead.
+  # Dispatch it the same way — on a tag ref, never a branch — to retry a release
+  # whose tag already exists.
+  workflow_dispatch:
 
 env:
   IMAGE: ghcr.io/lockdep/stackradar-scanner
@@ -36,6 +43,15 @@ jobs:
     name: Verify
     runs-on: ubuntu-latest
     steps:
+      # The tag is the version. Dispatched on a branch there is nothing to
+      # release, and every step below would derive the wrong one — fail in
+      # seconds rather than after a build.
+      - name: Refuse to run off a tag
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        run: |
+          echo "::error::Release must run on a tag, but was dispatched on ${GITHUB_REF}. Use the Cut release workflow to make one."
+          exit 1
+
       - name: Checkout repository
         uses: actions/checkout@v6
 

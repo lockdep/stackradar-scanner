@@ -1,0 +1,190 @@
+name: Cut release
+
+# The one manual step in shipping a version: open this workflow, pick patch,
+# minor or major, and run it. It works out the number from the existing tags,
+# promotes the CHANGELOG's Unreleased entries into a section for it, commits
+# that to main, tags that commit and starts release.yaml, which does the
+# publishing. No git commands on anyone's laptop — see RELEASING.md.
+#
+# Nothing here decides *what* the version means. That judgement — is this a
+# breaking change for someone running `helm install --version X.Y.Z`? — is the
+# one thing a person still has to make, and it is the input to this workflow.
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Which part of the version this release moves
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+        default: patch
+        required: true
+      prerelease:
+        description: 'Cut a release candidate instead, e.g. "rc" for 0.2.0-rc.1. Leave blank for a normal release.'
+        type: string
+        default: ""
+      dry_run:
+        description: Work out the version and show the changelog diff without pushing anything
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+# Two releases cut at once would compute the same version from the same tags
+# and race to push it. Queue them instead.
+concurrency:
+  group: cut-release
+  cancel-in-progress: false
+
+jobs:
+  cut:
+    name: Cut ${{ inputs.bump }} release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # commit the changelog to main, push the tag
+      actions: write # start release.yaml at the new tag
+
+    steps:
+      # workflow_dispatch offers every branch and tag in the picker. A release
+      # cut from a feature branch would publish software that is not on main.
+      - name: Refuse to release from anywhere but main
+        if: github.ref != 'refs/heads/main'
+        run: |
+          echo "::error::Cut release must run on main, but was dispatched on ${GITHUB_REF#refs/*/}."
+          exit 1
+
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0 # the version comes from the existing tags
+
+      # release.yaml runs the build and tests itself before publishing, so this
+      # is not a gate on correctness — it is a gate on wasting a version number.
+      # A tag that fails verification has to be deleted and re-pushed, so it is
+      # worth spending a second here to notice that main is already red.
+      - name: Check CI on this commit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          conclusion="$(gh run list --workflow=ci.yaml --branch main --limit 50 \
+            --json headSha,conclusion \
+            --jq '[.[] | select(.headSha == env.SHA)] | first | .conclusion // ""')"
+
+          case "${conclusion}" in
+            success)
+              echo "CI passed on ${SHA}."
+              ;;
+            "")
+              # The previous release's changelog commit is pushed with
+              # GITHUB_TOKEN, which deliberately raises no push event and so
+              # runs no CI. Releasing twice with nothing in between lands here.
+              echo "::warning::No CI run found for ${SHA}. Releasing anyway; release.yaml builds and tests before it publishes."
+              ;;
+            *)
+              echo "::error::CI on ${SHA} is '${conclusion}'. Fix main before cutting a release."
+              exit 1
+              ;;
+          esac
+
+      - name: Work out the next version
+        id: version
+        env:
+          BUMP: ${{ inputs.bump }}
+          PRERELEASE: ${{ inputs.prerelease }}
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/next-version.py "${BUMP}" \
+            --prerelease "${PRERELEASE}" >> "$GITHUB_OUTPUT"
+
+      # A candidate rehearses a version it does not own: `v0.2.0-rc.1` ships the
+      # notes 0.2.0 will ship with, so the entries stay under Unreleased until
+      # 0.2.0 itself is cut. See RELEASING.md.
+      - name: Promote the changelog
+        if: inputs.prerelease == ''
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          PREVIOUS: ${{ steps.version.outputs.previous }}
+        run: |
+          set -euo pipefail
+          status=0
+          python3 .github/scripts/changelog.py "${VERSION}" \
+            --promote --previous "${PREVIOUS}" || status=$?
+
+          if [ "${status}" -eq 3 ]; then
+            echo "::error::CHANGELOG.md has no Unreleased entries to release. Write what changed for the people running the chart, land it on main, and cut the release again."
+            exit 1
+          fi
+          [ "${status}" -eq 0 ] || exit "${status}"
+
+          git --no-pager diff -- CHANGELOG.md
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      # Order matters: main first, then the tag. If the push to main is rejected
+      # because someone landed a commit while this ran, nothing has been tagged
+      # and re-running is free.
+      - name: Commit the changelog
+        if: inputs.prerelease == '' && !inputs.dry_run
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          # Re-cutting a number whose section is already written leaves nothing
+          # to commit, and that is a normal outcome rather than a failure.
+          if git diff --quiet -- CHANGELOG.md; then
+            echo "CHANGELOG.md already carries this version; nothing to commit."
+            exit 0
+          fi
+          git commit -m "Release ${VERSION}" -- CHANGELOG.md
+          git push origin HEAD:main
+
+      - name: Tag the release
+        if: ${{ !inputs.dry_run }}
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          git tag -a "v${VERSION}" -m "v${VERSION}"
+          git push origin "v${VERSION}"
+
+      # A push made with GITHUB_TOKEN raises no push event — that is what stops
+      # a workflow triggering itself in a loop — so pushing the tag above does
+      # not start release.yaml on its own. workflow_dispatch is one of the two
+      # events GitHub exempts from that rule, so start it explicitly, on the tag
+      # that was just created.
+      - name: Start the release workflow
+        if: ${{ !inputs.dry_run }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: gh workflow run release.yaml --ref "v${VERSION}"
+
+      - name: Summarise
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          PREVIOUS: ${{ steps.version.outputs.previous }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          {
+            if [ "${DRY_RUN}" = "true" ]; then
+              echo "## Dry run: would release \`v${VERSION}\`"
+              echo
+              echo "Nothing was committed, tagged or published."
+            else
+              echo "## Releasing \`v${VERSION}\`"
+              echo
+              echo "Tagged \`${PREVIOUS:-the first commit}\` → \`v${VERSION}\`."
+              echo "The [Release workflow](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/workflows/release.yaml)"
+              echo "is publishing the image and chart."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
