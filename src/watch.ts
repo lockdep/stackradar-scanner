@@ -177,11 +177,11 @@ async function scanImage(info: ImageInfo, coreApi: k8s.CoreV1Api): Promise<void>
             return;
         }
 
-        const { version, registry } = parseImageRef(info.displayName);
+        const { tag, registry } = parseImageRef(info.displayName);
         const projectName = `${info.workloadName}/${info.containerName}`;
         try {
-            await uploadSBOM(sbomFile, projectName, version, info.namespace, registry, info.digest, info.pullRef, info.workloadKind, info.podLabels, info.podAnnotations);
-            log.info({ projectName, version, namespace: info.namespace }, "upload succeeded");
+            await uploadSBOM(sbomFile, projectName, tag, info.namespace, registry, info.digest, info.pullRef, info.workloadKind, info.podLabels, info.podAnnotations);
+            log.info({ projectName, tag, namespace: info.namespace }, "upload succeeded");
         } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
             const cause = err instanceof Error && (err as NodeJS.ErrnoException).cause;

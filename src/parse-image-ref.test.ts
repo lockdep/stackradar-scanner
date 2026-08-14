@@ -39,31 +39,50 @@ describe("parseImageRef", () => {
         it("should handle digest on a registry-prefixed image", () => {
             expect(parseImageRef("docker.io/library/nginx@sha256:abc123").projectName).toBe("library/nginx");
         });
+
+        it("should strip both tag and digest", () => {
+            expect(parseImageRef("ghcr.io/acme/api:v1.4.0@sha256:abc123").projectName).toBe("acme/api");
+        });
     });
 
-    describe("version extraction", () => {
-        it("should return 'latest' when no tag present", () => {
-            expect(parseImageRef("nginx").version).toBe("latest");
+    // The scanner never invents a tag. "latest" for a tagless ref is the
+    // registry's own default, and applying it here labelled every distinct
+    // digest-pinned image identically.
+    describe("tag extraction", () => {
+        it("should return undefined when no tag present", () => {
+            expect(parseImageRef("nginx").tag).toBeUndefined();
         });
 
         it("should extract plain version tag", () => {
-            expect(parseImageRef("nginx:1.25").version).toBe("1.25");
+            expect(parseImageRef("nginx:1.25").tag).toBe("1.25");
         });
 
         it("should extract semver tag with prefix", () => {
-            expect(parseImageRef("myapp:v2.3.1").version).toBe("v2.3.1");
+            expect(parseImageRef("myapp:v2.3.1").tag).toBe("v2.3.1");
         });
 
         it("should extract tag from image with registry", () => {
-            expect(parseImageRef("docker.io/library/nginx:1.25").version).toBe("1.25");
+            expect(parseImageRef("docker.io/library/nginx:1.25").tag).toBe("1.25");
         });
 
-        it("should return 'latest' when only digest present (no tag)", () => {
-            expect(parseImageRef("nginx@sha256:abc123").version).toBe("latest");
+        it("should return undefined when only digest present (no tag)", () => {
+            expect(parseImageRef("nginx@sha256:abc123").tag).toBeUndefined();
+        });
+
+        it("should return undefined for a digest-pinned registry image", () => {
+            expect(parseImageRef("ghcr.io/acme/api@sha256:abc123").tag).toBeUndefined();
+        });
+
+        it("should extract the tag when both tag and digest are present", () => {
+            expect(parseImageRef("ghcr.io/acme/api:v1.4.0@sha256:abc123").tag).toBe("v1.4.0");
         });
 
         it("should not confuse registry port with tag", () => {
-            expect(parseImageRef("localhost:5000/myapp:dev").version).toBe("dev");
+            expect(parseImageRef("localhost:5000/myapp:dev").tag).toBe("dev");
+        });
+
+        it("should return undefined for a tagless image behind a ported registry", () => {
+            expect(parseImageRef("localhost:5000/myapp").tag).toBeUndefined();
         });
     });
 

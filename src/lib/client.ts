@@ -130,7 +130,7 @@ export async function checkExistingSbom(
 export async function uploadSBOM(
     sbomFile: string,
     projectName: string,
-    version: string,
+    tag: string | undefined,
     groupName: string,
     registry: string | undefined,
     imageDigest: string | undefined,
@@ -141,7 +141,9 @@ export async function uploadSBOM(
 ): Promise<void> {
     const url = new URL(`${API_URL}/v1/sboms/upload/cyclonedx`);
     url.searchParams.set("projectName", projectName);
-    url.searchParams.set("version", version);
+    // Omitted entirely for a digest-pinned image — the server stores NULL and
+    // the UI shows the digest instead of a tag nobody deployed.
+    if (tag) url.searchParams.set("tag", tag);
     url.searchParams.set("groupName", groupName);
     url.searchParams.set("groupLabels", JSON.stringify({ type: "namespace" }));
     if (registry) url.searchParams.set("registry", registry);
