@@ -18,6 +18,8 @@ Removed, Fixed, Security — so use those six and nothing else.
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-08-14
+
 ### Added
 
 - `networkPolicy.enabled` and `networkPolicy.egress` — a NetworkPolicy for the
@@ -261,5 +263,6 @@ and can read this as the starting point.
 - The pod runs non-root (uid 65534) with a read-only root filesystem, all Linux
   capabilities dropped and no privilege escalation.
 
-[Unreleased]: https://github.com/lockdep/stackradar-scanner/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/lockdep/stackradar-scanner/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/lockdep/stackradar-scanner/compare/v0.1.1...v0.1.2
 [0.1.0]: https://github.com/lockdep/stackradar-scanner/releases/tag/v0.1.0
