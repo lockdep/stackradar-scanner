@@ -1,29 +1,62 @@
-StackRadar Scanner has been installed.
+{{- $fullname := include "stackradar-scanner.fullname" . -}}
+{{- $hasCredentials := or .Values.stackradar.apiKey .Values.stackradar.existingSecret -}}
+{{- /*
+The UI that issues the credentials lives on the `app.` host of whichever
+environment `apiUrl` points at — api.stackradar.io / dev.api.stackradar.io pair
+with app.stackradar.io / dev.app.stackradar.io. An apiUrl that is not one of
+those (a port-forward, say) has no derivable UI, so fall back to production
+rather than print a link that goes nowhere.
+*/ -}}
+{{- $apiUrl := trimSuffix "/" .Values.stackradar.apiUrl -}}
+{{- $appUrl := "https://app.stackradar.io" -}}
+{{- if contains "api." $apiUrl -}}
+{{- $appUrl = replace "api." "app." $apiUrl -}}
+{{- end -}}
+StackRadar Scanner {{ .Chart.Version }} has been installed.
 
-Deployment:  {{ include "stackradar-scanner.fullname" . }}-watcher
 Namespace:   {{ .Release.Namespace }}
-Sweep:       every {{ .Values.watcher.sweepIntervalMs }}ms
+{{ if .Values.watcher.enabled }}Deployment:  {{ $fullname }}-watcher
+{{ end }}API:         {{ $apiUrl }}
+Sweep:       {{ if eq (int64 .Values.watcher.sweepIntervalMs) 0 }}disabled — informer events only{{ else }}every {{ div (int64 .Values.watcher.sweepIntervalMs) 1000 | duration }}{{ end }}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+{{- if not .Values.watcher.enabled }}
 
-Verify the watcher is running:
+watcher.enabled is false, so no Deployment was created and nothing is
+scanning. Re-run with --set watcher.enabled=true to start the watcher.
+{{- else if not $hasCredentials }}
 
-  kubectl rollout status deployment/{{ include "stackradar-scanner.fullname" . }}-watcher \
-    -n {{ .Release.Namespace }}
+NEXT STEP — the watcher is not running yet.
 
-Watch the scanner logs:
+Its pod stays in CreateContainerConfigError until a Secret named
+{{ $fullname }} exists in this namespace. Create it with the cluster ID
+and API key from {{ $appUrl }}/clusters (Clusters → New cluster):
 
-  kubectl logs -l app.kubernetes.io/name={{ include "stackradar-scanner.name" . }},app.kubernetes.io/component=watcher \
-    -n {{ .Release.Namespace }} -f
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-{{- if and (not .Values.stackradar.apiKey) (not .Values.stackradar.existingSecret) }}
-
-WARNING: No API credentials configured. Create the Secret manually before the
-         watcher can connect to StackRadar:
-
-  kubectl create secret generic {{ include "stackradar-scanner.fullname" . }} \
+  kubectl create secret generic {{ $fullname }} \
     --namespace {{ .Release.Namespace }} \
     --from-literal=cluster-id=<your-cluster-id> \
     --from-literal=api-key=<your-api-key>
+
+The kubelet picks the Secret up by itself, usually within a minute — no
+helm upgrade and no pod restart needed. Watch the pod reach Running:
+
+  kubectl get pods -n {{ .Release.Namespace }} -w
+{{- else }}
+
+Wait for the watcher to become ready — the first informer sync has to
+finish, which takes longer on a large cluster:
+
+  kubectl rollout status deployment/{{ $fullname }}-watcher \
+    -n {{ .Release.Namespace }} --timeout=5m
 {{- end }}
+{{- if .Values.watcher.enabled }}
+
+Once the pod is Running, follow the scan log:
+
+  kubectl logs -l app.kubernetes.io/name={{ include "stackradar-scanner.name" . }},app.kubernetes.io/component=watcher \
+    -n {{ .Release.Namespace }} -f
+{{- end }}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Configuration reference: https://github.com/lockdep/stackradar-scanner
