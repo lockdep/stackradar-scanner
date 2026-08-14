@@ -168,7 +168,7 @@ async function scanImage(info: ImageInfo, coreApi: k8s.CoreV1Api): Promise<void>
         }
 
         try {
-            sbomFile = generateSBOM(info.pullRef, dockerConfigDir);
+            sbomFile = await generateSBOM(info.pullRef, dockerConfigDir);
         } catch (err) {
             log.error({
                 image: info.displayName,

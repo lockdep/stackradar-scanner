@@ -1,8 +1,9 @@
 import * as k8s from "@kubernetes/client-node";
-import { execFileSync } from "child_process";
+import { execFile } from "child_process";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
+import { promisify } from "util";
 import { log } from "./logger.js";
 
 // ─── Config ──────────────────────────────────────────────────────────────────
@@ -362,18 +363,35 @@ export function buildTempDockerConfig(
 
 // ─── SBOM generation ─────────────────────────────────────────────────────────
 
-export function generateSBOM(pullRef: string, dockerConfigDir?: string): string {
+const execFileAsync = promisify(execFile);
+
+/**
+ * Runs syft against `pullRef` and returns the path to the CycloneDX output.
+ *
+ * Async on purpose. The synchronous `execFileSync` blocks the event loop for
+ * the whole run — up to `SYFT_TIMEOUT_MS`, five minutes by default — and while
+ * it does, nothing else in the process gets a turn. The health server is the
+ * casualty that shows up first: the kubelet's connection is accepted into the
+ * listen backlog but never answered, so the liveness probe reports "context
+ * deadline exceeded while awaiting headers" (not `connection refused` — the
+ * listener is fine, the loop is not) and the pod is killed mid-scan at
+ * `failureThreshold` × `periodSeconds`.
+ *
+ * Keeping the loop free is also what makes the `Semaphore` in `watch.ts` mean
+ * anything: under `execFileSync` every scan ran serially no matter what
+ * `CONCURRENT_SCANS` was set to.
+ */
+export async function generateSBOM(pullRef: string, dockerConfigDir?: string): Promise<string> {
     const tmpFile = path.join(
         os.tmpdir(),
         `sbom-${Date.now()}-${Math.random().toString(36).slice(2)}.json`
     );
 
-    execFileSync(
+    await execFileAsync(
         "syft",
         [`registry:${pullRef}`, "-o", `cyclonedx-json=${tmpFile}`],
         {
             timeout: SYFT_TIMEOUT_MS,
-            stdio: "pipe",
             maxBuffer: 10 * 1024 * 1024,
             env: dockerConfigDir
                 ? { ...process.env, DOCKER_CONFIG: dockerConfigDir }
