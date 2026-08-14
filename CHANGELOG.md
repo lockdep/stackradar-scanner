@@ -18,6 +18,8 @@ Removed, Fixed, Security — so use those six and nothing else.
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-08-14
+
 ### Added
 
 - Workload inventory reporting. Within seconds of starting, the agent now tells
@@ -279,6 +281,7 @@ and can read this as the starting point.
 - The pod runs non-root (uid 65534) with a read-only root filesystem, all Linux
   capabilities dropped and no privilege escalation.
 
-[Unreleased]: https://github.com/lockdep/stackradar-scanner/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/lockdep/stackradar-scanner/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/lockdep/stackradar-scanner/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/lockdep/stackradar-scanner/compare/v0.1.1...v0.1.2
 [0.1.0]: https://github.com/lockdep/stackradar-scanner/releases/tag/v0.1.0
