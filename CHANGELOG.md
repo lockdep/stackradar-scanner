@@ -36,6 +36,17 @@ Removed, Fixed, Security — so use those six and nothing else.
   accept the report is not an error: the agent notices the 404 and carries on
   scanning.
 
+  The same report is also what lets StackRadar tell you *which* of your
+  workloads it has no SBOM for. The cluster page gains a Coverage panel listing
+  them by namespace, workload and image, and anything still unscanned after 30
+  minutes is called out as stuck rather than left sitting under "generating
+  SBOMs" — that is longer than an image pull and a syft run should take. This
+  is where a private registry the agent cannot authenticate to, an image pull
+  backoff, or a scan that ran out of memory becomes visible, named image by
+  image, instead of quietly showing up as a workload count that is a few short.
+  Nothing to configure on the agent; it follows from the report it already
+  sends.
+
 ## [0.1.2] - 2026-08-14
 
 ### Added
