@@ -18,6 +18,8 @@ Removed, Fixed, Security — so use those six and nothing else.
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-08-15
+
 ### Fixed
 
 - **Helm releases are now actually detected; 0.1.4 found none on most
@@ -389,7 +391,8 @@ and can read this as the starting point.
 - The pod runs non-root (uid 65534) with a read-only root filesystem, all Linux
   capabilities dropped and no privilege escalation.
 
-[Unreleased]: https://github.com/lockdep/stackradar-scanner/compare/v0.1.4...HEAD
+[Unreleased]: https://github.com/lockdep/stackradar-scanner/compare/v0.1.5...HEAD
+[0.1.5]: https://github.com/lockdep/stackradar-scanner/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/lockdep/stackradar-scanner/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/lockdep/stackradar-scanner/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/lockdep/stackradar-scanner/compare/v0.1.1...v0.1.2
