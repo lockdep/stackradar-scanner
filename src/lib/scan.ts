@@ -247,6 +247,13 @@ export const RELEVANT_POD_LABEL_KEYS = new Set([
     "app.kubernetes.io/instance",
     "app.kubernetes.io/managed-by",
     "helm.sh/chart",
+    // Helm's pre-3.0 label set, still emitted by charts that never migrated —
+    // `release` is the release name, `chart` is `<name>-<version>`, `heritage`
+    // is `Helm`. kube-prometheus-stack is the common case: it carries both
+    // spellings, and only the legacy `chart` names the umbrella chart.
+    "release",
+    "chart",
+    "heritage",
 ]);
 
 // Annotations we keep. These are deployment-tooling breadcrumbs that aren't
@@ -627,18 +634,55 @@ export function parseHelmChartLabel(label: string | undefined): {
     return { chartName: label, chartVersion: null };
 }
 
-/** The Helm release a pod belongs to, from annotations the agent already keeps. */
+/**
+ * The Helm release a pod belongs to.
+ *
+ * **Read from labels, not from `meta.helm.sh/release-*`.** Helm writes those
+ * annotations onto the objects it manages directly — the Deployment, the
+ * StatefulSet — and nothing propagates them to the pod template, so on a real
+ * cluster no pod carries them and an annotation-gated check finds zero releases
+ * everywhere. Worse, a chart applied by ArgoCD or Flux has them on nothing at
+ * all: the renderer is Helm but the installer is not, and only the labels
+ * survive that hand-off.
+ *
+ * What does reach the pod is the standard label set every chart templates into
+ * `spec.template.metadata.labels`: `app.kubernetes.io/instance` is the release
+ * name and `helm.sh/chart` is `<chart>-<version>`. The annotations are still
+ * honoured first where they do appear — a bare pod `helm install`ed on its own
+ * has them, and they are the only source that can name a release living in a
+ * *different* namespace than the workload.
+ */
 function releaseForPod(info: ImageInfo): InventoryRelease | null {
-    const name = info.podAnnotations["meta.helm.sh/release-name"];
-    /* The *release's* namespace, not the workload's. A chart may deploy
-       resources into other namespaces, and keying on the workload's namespace
-       silently splits one release into several. Falling back to the workload's
-       namespace only when the annotation is missing entirely — which means Helm
-       did not write it, so there is no release. */
-    const namespace = info.podAnnotations["meta.helm.sh/release-namespace"];
-    if (!name || !namespace) return null;
+    /* Authoritative when present, which is rare: Helm wrote it, so both the
+       name and the release's own namespace are facts rather than inferences. */
+    const annotatedName = info.podAnnotations["meta.helm.sh/release-name"];
+    const annotatedNamespace = info.podAnnotations["meta.helm.sh/release-namespace"];
 
-    const { chartName, chartVersion } = parseHelmChartLabel(info.podLabels["helm.sh/chart"]);
+    /* `app.kubernetes.io/managed-by` names the controller that owns the object.
+       When something other than Helm claims it, `instance` is that controller's
+       grouping key and not a release name — prometheus-operator stamps
+       `instance: kube-prometheus-stack-alertmanager` on pods of a StatefulSet
+       it generated itself, and trusting it would invent a release that no
+       `helm list` will ever show. */
+    const managedBy = info.podLabels["app.kubernetes.io/managed-by"] ?? info.podLabels["heritage"];
+    if (!annotatedName && managedBy && managedBy.toLowerCase() !== "helm") return null;
+
+    const name =
+        annotatedName ??
+        info.podLabels["app.kubernetes.io/instance"] ??
+        info.podLabels["release"];
+    if (!name) return null;
+
+    /* The *release's* namespace, not the workload's — a chart may deploy
+       resources into other namespaces, and keying on the workload's namespace
+       silently splits one release into several. Only the annotation can tell
+       them apart; with labels alone the workload's namespace is the honest
+       best answer, and it is right for every single-namespace release. */
+    const namespace = annotatedNamespace ?? info.namespace;
+
+    const { chartName, chartVersion } = parseHelmChartLabel(
+        info.podLabels["helm.sh/chart"] ?? info.podLabels["chart"]
+    );
 
     return {
         name,
@@ -652,6 +696,31 @@ function releaseForPod(info: ImageInfo): InventoryRelease | null {
         repoUrl: null,
         source: "helm",
     };
+}
+
+/**
+ * Fold one pod's view of a release into what the other pods already said.
+ *
+ * Not "first one wins", because of subcharts. Every pod of the
+ * `kube-prometheus-stack` release carries its *own* subchart in `helm.sh/chart`
+ * — `grafana-11.3.7` on one, `kube-state-metrics-7.2.2` on the next — so
+ * whichever pod the informer happened to hand over last would name the whole
+ * release, and the answer would change between reports for no reason in the
+ * cluster.
+ *
+ * The umbrella chart is the one whose name matches the release, so it wins
+ * outright. Failing that a named chart beats an unnamed one, and the result no
+ * longer depends on iteration order.
+ */
+export function mergeRelease(
+    existing: InventoryRelease | undefined,
+    incoming: InventoryRelease,
+): InventoryRelease {
+    if (!existing) return incoming;
+    if (existing.chartName === existing.name) return existing;
+    if (incoming.chartName === incoming.name) return incoming;
+    if (!existing.chartName && incoming.chartName) return incoming;
+    return existing;
 }
 
 const releaseKey = (namespace: string, name: string) => `${namespace}\u0000${name}`;
@@ -691,7 +760,10 @@ export function buildInventory(pods: readonly k8s.V1Pod[]): InventoryReport {
             }
 
             const release = releaseForPod(info);
-            if (release) releases.set(releaseKey(release.namespace, release.name), release);
+            if (release) {
+                const key = releaseKey(release.namespace, release.name);
+                releases.set(key, mergeRelease(releases.get(key), release));
+            }
 
             const wKey = `${info.namespace}\u0000${info.workloadKind ?? ""}\u0000${info.workloadName}`;
             let entry = workloads.get(wKey);

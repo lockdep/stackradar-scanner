@@ -30,7 +30,10 @@ describe("the label and annotation allowlists", () => {
             "app.kubernetes.io/name",
             "app.kubernetes.io/part-of",
             "app.kubernetes.io/version",
+            "chart",
             "helm.sh/chart",
+            "heritage",
+            "release",
             "version",
           ]
         `);

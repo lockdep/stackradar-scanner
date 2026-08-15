@@ -119,9 +119,10 @@ Sent to your StackRadar API endpoint, per image:
 - **Placement**: namespace, and the workload kind (`Deployment`, `StatefulSet`, …).
 - **A workload name**, taken from the `app.kubernetes.io/name` or `app` pod
   label, falling back to the pod name with its generated suffix stripped.
-- **Allowlisted pod labels** — exactly these nine keys, and no others:
+- **Allowlisted pod labels** — exactly these twelve keys, and no others:
   `app`, `version`, `app.kubernetes.io/{name,version,component,part-of,instance,managed-by}`,
-  `helm.sh/chart`.
+  `helm.sh/chart`, and Helm's pre-3.0 spelling of the last three,
+  `release`, `chart`, `heritage`.
 - **Allowlisted pod annotations** — exactly these three:
   `meta.helm.sh/release-name`, `meta.helm.sh/release-namespace`,
   `argocd.argoproj.io/tracking-id`.

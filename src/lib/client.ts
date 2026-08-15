@@ -252,12 +252,19 @@ export async function reportInventory(report: InventoryReport): Promise<void> {
         body: JSON.stringify(report),
     });
 
-    // A control plane older than this scanner has no such route, or has one that
-    // speaks v1 and rejects this body. Scanners and the server release
-    // independently, so both are normal deployment states — log once per
-    // interval at a level that does not read as an outage, and keep scanning.
+    /* A control plane older than this scanner has no such route. Scanners and
+       the server release independently, so that is a normal deployment state
+       and it must not stop the SBOM uploads — but it is `warn`, not `debug`.
+       Inventory is the primary write path for namespaces, workloads, releases
+       and every label on them; at `debug` a 404 is invisible in a default
+       install, and the agent looks perfectly healthy while the entire
+       deployment side of the model silently never lands. That is exactly how a
+       route missing from an ingress allowlist went unnoticed. */
     if (response.status === 404) {
-        log.debug("inventory endpoint not available on this control plane, skipping");
+        log.warn(
+            { url },
+            "inventory endpoint returned 404 — no deployment context (namespaces, workloads, Helm releases) will be recorded; check the control plane version and that the route is reachable through your ingress",
+        );
         return;
     }
     if (response.status === 400) {

@@ -265,7 +265,7 @@ describe("buildInventory", () => {
                 },
             });
 
-        it("derives a release from annotations the agent already collects", () => {
+        it("derives a release from annotations when Helm wrote them", () => {
             const report = buildInventory([helmPod("prod", "prod")]);
 
             expect(report.releases).toEqual([{
@@ -290,6 +290,115 @@ describe("buildInventory", () => {
             expect(report.releases[0]!.namespace).toBe("prod");
             expect(report.namespaces[0]!.name).toBe("redis-data");
             expect(report.namespaces[0]!.workloads[0]!.release).toEqual({ name: "prod-redis", namespace: "prod" });
+        });
+
+        /*
+         * The case every real cluster is in. `meta.helm.sh/release-*` lives on
+         * the Deployment, never on the pod template, so a check that required
+         * it found zero releases on a cluster where `helm list` shows a dozen.
+         * The standard labels are what actually reach the pod.
+         */
+        it("derives a release from the standard labels, with no annotations at all", () => {
+            const report = buildInventory([
+                deploymentPod("cert-manager-77dc4bb696-zsr7w", "cert-manager", "77dc4bb696", {
+                    namespace: "cert-manager",
+                    labels: {
+                        "app.kubernetes.io/instance": "cert-manager",
+                        "app.kubernetes.io/managed-by": "Helm",
+                        "app.kubernetes.io/version": "v1.19.2",
+                        "helm.sh/chart": "cert-manager-v1.19.2",
+                    },
+                }),
+            ]);
+
+            expect(report.releases).toEqual([{
+                name: "cert-manager",
+                namespace: "cert-manager",
+                chartName: "cert-manager",
+                chartVersion: "v1.19.2",
+                appVersion: "v1.19.2",
+                repoUrl: null,
+                source: "helm",
+            }]);
+            expect(report.namespaces[0]!.workloads[0]!.release)
+                .toEqual({ name: "cert-manager", namespace: "cert-manager" });
+        });
+
+        /* Charts that never migrated off Helm 2's label spelling. */
+        it("falls back to the pre-3.0 release/chart/heritage labels", () => {
+            const report = buildInventory([
+                deploymentPod("kps-operator-6846466799-lbjc9", "kps-operator", "6846466799", {
+                    namespace: "monitoring",
+                    labels: {
+                        release: "kube-prometheus-stack",
+                        chart: "kube-prometheus-stack-82.18.0",
+                        heritage: "Helm",
+                    },
+                }),
+            ]);
+
+            expect(report.releases).toEqual([{
+                name: "kube-prometheus-stack",
+                namespace: "monitoring",
+                chartName: "kube-prometheus-stack",
+                chartVersion: "82.18.0",
+                appVersion: null,
+                repoUrl: null,
+                source: "helm",
+            }]);
+        });
+
+        /*
+         * prometheus-operator stamps `app.kubernetes.io/instance` on pods of
+         * StatefulSets it generates itself. Trusting `instance` unconditionally
+         * would invent `kube-prometheus-stack-alertmanager` as a release that
+         * no `helm list` will ever show.
+         */
+        it("ignores an instance label owned by a controller that is not Helm", () => {
+            const report = buildInventory([
+                pod({
+                    name: "alertmanager-kube-prometheus-stack-alertmanager-0",
+                    namespace: "monitoring",
+                    ownerReferences: [{ kind: "StatefulSet", name: "alertmanager-kps-alertmanager", controller: true }],
+                    labels: {
+                        "app.kubernetes.io/instance": "kube-prometheus-stack-alertmanager",
+                        "app.kubernetes.io/managed-by": "prometheus-operator",
+                    },
+                }),
+            ]);
+
+            expect(report.releases).toEqual([]);
+            expect(report.namespaces[0]!.workloads[0]!.release).toBeNull();
+        });
+
+        /*
+         * Subcharts. Every pod of one release carries its *own* chart label, so
+         * "last pod wins" would name the release after whichever subchart the
+         * informer handed over last — an answer that changes between reports
+         * with nothing changing in the cluster.
+         */
+        it("names a release after its umbrella chart, not whichever subchart came last", () => {
+            const member = (name: string, chartLabels: Record<string, string>) =>
+                deploymentPod(`${name}-699f74b8c6-hl4x2`, name, "699f74b8c6", {
+                    namespace: "monitoring",
+                    labels: { "app.kubernetes.io/instance": "kube-prometheus-stack", ...chartLabels },
+                });
+
+            const pods = [
+                member("kube-prometheus-stack-grafana", { "helm.sh/chart": "grafana-11.3.7" }),
+                member("kube-prometheus-stack-operator", { chart: "kube-prometheus-stack-82.18.0" }),
+                member("kube-prometheus-stack-kube-state-metrics", { "helm.sh/chart": "kube-state-metrics-7.2.2" }),
+            ];
+
+            for (const order of [pods, [...pods].reverse()]) {
+                const report = buildInventory(order);
+                expect(report.releases).toHaveLength(1);
+                expect(report.releases[0]).toMatchObject({
+                    name: "kube-prometheus-stack",
+                    chartName: "kube-prometheus-stack",
+                    chartVersion: "82.18.0",
+                });
+            }
         });
 
         it("reports no release for a workload no chart manages", () => {
