@@ -18,6 +18,52 @@ Removed, Fixed, Security — so use those six and nothing else.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Helm releases are now actually detected; 0.1.4 found none on most
+  clusters.** 0.1.4 started reporting the Helm release and chart behind each
+  workload, but read them from the `meta.helm.sh/release-name` and
+  `-namespace` annotations. Helm writes those onto the objects it manages —
+  the Deployment, the StatefulSet — and nothing copies them down into the pod
+  template, so no pod carries them and the agent reported zero releases on a
+  cluster where `helm list` shows a dozen. A chart applied by ArgoCD or Flux
+  has them nowhere at all: Helm rendered the manifests, something else
+  installed them. Grouping by chart in StackRadar was empty for almost
+  everyone.
+
+  The release now comes from the standard labels every chart templates into
+  its pod spec — `app.kubernetes.io/instance` for the release name,
+  `helm.sh/chart` for `<chart>-<version>` — with Helm's pre-3.0 spelling
+  (`release`, `chart`, `heritage`) as a fallback for charts that never
+  migrated. The annotations are still honoured first where they do appear:
+  they are the only source that can name a release living in a *different*
+  namespace than the workload, and without them the workload's own namespace
+  is used, which is correct for every single-namespace release.
+
+  Two things it deliberately does not do. It does not invent a release when
+  `app.kubernetes.io/managed-by` (or `heritage`) names a controller that is
+  not Helm — prometheus-operator stamps an `instance` label on StatefulSets it
+  generates itself, and that name would never show up in `helm list`. And for
+  an umbrella chart it reports the umbrella rather than whichever subchart the
+  last pod happened to carry, so `kube-prometheus-stack` stays
+  `kube-prometheus-stack` instead of alternating between `grafana` and
+  `kube-state-metrics` from one report to the next.
+
+  Nothing to configure and no new RBAC. Three keys join the pod-label
+  allowlist — `release`, `chart` and `heritage`, twelve in total — and like
+  the rest of that list they ride the inventory report, not the SBOM.
+
+### Changed
+
+- **A control plane with no inventory endpoint now says so at `warn`.** The
+  404 was logged at `debug`, which a default install never prints, so an agent
+  whose every inventory report was being rejected looked perfectly healthy
+  while namespaces, workloads and Helm releases silently never landed — which
+  is exactly how a route missing from an ingress allowlist went unnoticed. The
+  message now names what is not being recorded and what to check. As before,
+  the 404 does not stop SBOM uploads, so an agent ahead of its control plane
+  keeps finding vulnerabilities.
+
 ## [0.1.4] - 2026-08-15
 
 ### Changed
