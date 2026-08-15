@@ -12,9 +12,6 @@ import {
     EXCLUDE_IMAGES,
     shouldScan,
     shouldScanImage,
-    pickPodLabels,
-    pickPodAnnotations,
-    deriveWorkloadName,
     loadKubeConfig,
     resolveRegistryAuth,
     buildTempDockerConfig,
@@ -71,12 +68,18 @@ const sem = new Semaphore(CONCURRENT_SCANS);
 
 async function handlePod(pod: k8s.V1Pod, coreApi: k8s.CoreV1Api): Promise<void> {
     for (const info of podImages(pod)) {
-        // Keyed by `${digest}::${namespace}::${containerName}` to avoid
-        // re-scanning the same running container across informer re-syncs or
-        // pod restarts with the same image binary.
-        const dedupKey = `${info.digest}::${info.namespace}::${info.containerName}`;
-        if (seenDigests.has(dedupKey)) continue;
-        seenDigests.add(dedupKey);
+        /* Keyed by the digest alone.
+         *
+         * It used to be `${digest}::${namespace}::${containerName}`, which made
+         * the same image in five namespaces five pulls, five syft runs, five
+         * component sets and five matching passes. A digest is
+         * content-addressed — the bytes are identical wherever they run — so
+         * scanning it once is not an optimisation, it is the correct number of
+         * times. Where the image runs is reported separately, by the inventory.
+         * See sbom-tracker ADR 0004. */
+        if (!info.digest) continue;
+        if (seenDigests.has(info.digest)) continue;
+        seenDigests.add(info.digest);
 
         // Fire-and-forget — concurrency controlled by Semaphore
         scanImage(info, coreApi).catch((err) =>
@@ -87,10 +90,26 @@ async function handlePod(pod: k8s.V1Pod, coreApi: k8s.CoreV1Api): Promise<void> 
 
 // ─── Inventory ───────────────────────────────────────────────────────────────
 
-/** Best-effort: a failed report costs a progress indicator, never a scan. */
+/**
+ * Best-effort: a failed report costs a progress indicator, never a scan.
+ *
+ * Only ever called after the informer's initial list has completed, which is
+ * what lets it claim `informerSynced: true`. That flag is not decoration — a
+ * full-set replacement built from a half-synced informer would delete most of
+ * the cluster's inventory, and the server rejects reports that admit to it.
+ */
 async function publishInventory(pods: readonly k8s.V1Pod[]): Promise<void> {
+    const report = buildInventory(pods);
+    if (report.namespaces.length === 0) {
+        /* A report with no namespaces would be a request to wipe the cluster's
+           inventory, and the server rejects it. A genuinely empty cluster is
+           represented by *no report*, ageing out via lastSeenAt instead of
+           being truncated in one step. */
+        log.debug("informer sees no scannable workloads, skipping inventory report");
+        return;
+    }
     try {
-        await reportInventory(buildInventory(pods));
+        await reportInventory(report);
     } catch (err) {
         log.warn({ err: err instanceof Error ? err.message : String(err) }, "inventory report failed");
     }
@@ -100,8 +119,7 @@ async function publishInventory(pods: readonly k8s.V1Pod[]): Promise<void> {
 
 async function scanImage(info: ImageInfo, coreApi: k8s.CoreV1Api): Promise<void> {
     if (SKIP_EXISTING_DIGESTS && info.digest) {
-        const projectName = `${info.workloadName}/${info.containerName}`;
-        const exists = await checkExistingSbom(info.digest, projectName, info.namespace);
+        const exists = await checkExistingSbom(info.digest);
         if (exists) {
             log.debug({ image: info.displayName, digest: info.digest }, "digest already indexed, skipping");
             return;
@@ -136,16 +154,30 @@ async function scanImage(info: ImageInfo, coreApi: k8s.CoreV1Api): Promise<void>
             return;
         }
 
-        const { tag, registry } = parseImageRef(info.displayName);
-        const projectName = `${info.workloadName}/${info.containerName}`;
+        const { tag, registry, projectName: repository } = parseImageRef(info.displayName);
         try {
-            await uploadSBOM(sbomFile, projectName, tag, info.namespace, registry, info.digest, info.pullRef, info.workloadKind, info.podLabels, info.podAnnotations);
-            log.info({ projectName, tag, namespace: info.namespace }, "upload succeeded");
+            await uploadSBOM(
+                sbomFile,
+                {
+                    imageDigest: info.digest!,
+                    imageRef: info.pullRef,
+                    registry,
+                    repository: repository || undefined,
+                },
+                {
+                    namespace: info.namespace,
+                    workloadName: info.workloadName,
+                    workloadKind: info.workloadKind,
+                    containerName: info.containerName,
+                    imageTag: tag,
+                },
+            );
+            log.info({ digest: info.digest, tag, namespace: info.namespace, workload: info.workloadName }, "upload succeeded");
         } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
             const cause = err instanceof Error && (err as NodeJS.ErrnoException).cause;
             const detail = cause instanceof Error ? cause.message : cause ? String(cause) : undefined;
-            log.error({ projectName, namespace: info.namespace, err: msg, cause: detail }, "upload failed");
+            log.error({ digest: info.digest, namespace: info.namespace, err: msg, cause: detail }, "upload failed");
         }
     } finally {
         sem.release();

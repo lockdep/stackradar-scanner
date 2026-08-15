@@ -1,5 +1,5 @@
 import * as fs from "fs";
-import { API_URL, API_KEY, SCANNER_VERSION, CLUSTER_NAME, CLUSTER_ID, type InventoryWorkload } from "./scan.js";
+import { API_URL, API_KEY, SCANNER_VERSION, CLUSTER_ID, type InventoryReport } from "./scan.js";
 import { log } from "./logger.js";
 import { recordHeartbeatOk, recordHeartbeatFailure } from "./health.js";
 
@@ -99,17 +99,20 @@ export async function heartbeat(): Promise<void> {
 
 // ─── Digest check ────────────────────────────────────────────────────────────
 
-export async function checkExistingSbom(
-    imageDigest: string,
-    projectName: string,
-    groupName: string,
-): Promise<boolean> {
+/**
+ * Has this digest already been scanned — by anyone, anywhere.
+ *
+ * Digest only. The old form also sent `projectName` and `groupName`, which made
+ * the answer depend on *where* the image was running: one image in five
+ * namespaces was five pulls, five syft runs and five matching passes. A digest
+ * is content-addressed, so the bytes are the same wherever they run and the
+ * answer cannot depend on who is asking.
+ */
+export async function checkExistingSbom(imageDigest: string): Promise<boolean> {
     const url = new URL(`${API_URL}/v1/sboms/check`);
     url.searchParams.set("imageDigest", imageDigest);
-    url.searchParams.set("projectName", projectName);
-    url.searchParams.set("groupName", groupName);
 
-    log.info({ imageDigest, projectName, groupName }, "checking for existing SBOM");
+    log.debug({ imageDigest }, "checking for existing SBOM");
     try {
         const response = await fetchWithRetry(url.toString(), {
             headers: { "X-API-Key": API_KEY! },
@@ -117,61 +120,81 @@ export async function checkExistingSbom(
         if (!response.ok) return false;
         const data = await response.json() as { exists: boolean };
         const exists = data.exists === true;
-        log.info({ imageDigest, projectName, groupName, exists }, "existing SBOM check result");
+        log.debug({ imageDigest, exists }, "existing SBOM check result");
         return exists;
     } catch (err) {
-        log.warn({ imageDigest, projectName, groupName, err: err instanceof Error ? err.message : String(err) }, "existing SBOM check failed");
+        // A failed check costs a redundant scan, never a missing one.
+        log.warn({ imageDigest, err: err instanceof Error ? err.message : String(err) }, "existing SBOM check failed");
         return false;
     }
 }
 
 // ─── Upload ──────────────────────────────────────────────────────────────────
 
+/** What the SBOM describes: the bytes. */
+export interface UploadImageIdentity {
+    imageDigest: string;
+    imageRef: string;
+    registry: string | undefined;
+    repository: string | undefined;
+}
+
+/** Where those bytes run. Optional — an SBOM with no cluster behind it is fine. */
+export interface UploadWorkloadIdentity {
+    namespace: string;
+    workloadName: string;
+    workloadKind: string | null;
+    containerName: string;
+    /** Omitted for a digest-pinned deployment. Never invented as `"latest"`. */
+    imageTag: string | undefined;
+}
+
+/**
+ * Upload an SBOM for an image.
+ *
+ * The two identities are separate parameters, not one `"<workload>/<container>"`
+ * string plus a group name. The image identity says what was scanned and is
+ * required; the workload identity says where it runs and links the image to the
+ * container running it.
+ *
+ * Note what is no longer sent: pod labels and annotations. They are deployment
+ * context, they cannot live on a shareable artefact, and they now ride
+ * `POST /v1/inventory` instead — which is also the only payload that can
+ * express a mid-rollout Deployment honestly. See
+ * `docs/proposals/deployment-context-collection.md`.
+ */
 export async function uploadSBOM(
     sbomFile: string,
-    projectName: string,
-    tag: string | undefined,
-    groupName: string,
-    registry: string | undefined,
-    imageDigest: string | undefined,
-    imageRef: string,
-    workloadKind: string | undefined,
-    extraLabels?: Record<string, string>,
-    extraAnnotations?: Record<string, string>,
+    image: UploadImageIdentity,
+    workload: UploadWorkloadIdentity,
 ): Promise<void> {
     const url = new URL(`${API_URL}/v1/sboms/upload/cyclonedx`);
-    url.searchParams.set("projectName", projectName);
-    // Omitted entirely for a digest-pinned image — the server stores NULL and
-    // the UI shows the digest instead of a tag nobody deployed.
-    if (tag) url.searchParams.set("tag", tag);
-    url.searchParams.set("groupName", groupName);
-    url.searchParams.set("groupLabels", JSON.stringify({ type: "namespace" }));
-    if (registry) url.searchParams.set("registry", registry);
-    if (imageDigest) url.searchParams.set("imageDigest", imageDigest);
-    url.searchParams.set("imageRef", imageRef);
 
-    const projectLabels: Record<string, string> = { type: "container-image" };
-    if (workloadKind) projectLabels.workloadKind = workloadKind;
-    url.searchParams.set("projectLabels", JSON.stringify(projectLabels));
+    url.searchParams.set("imageDigest", image.imageDigest);
+    url.searchParams.set("imageRef", image.imageRef);
+    if (image.registry) url.searchParams.set("registry", image.registry);
+    if (image.repository) url.searchParams.set("repository", image.repository);
 
-    // Merge labels + annotations into a single labels bag. The allowlists are
-    // disjoint by key (Helm sets `helm.sh/chart` as a label, `meta.helm.sh/*`
-    // as annotations) so this avoids any DB schema change while keeping the
-    // useful breadcrumbs queryable in `sboms.labels`.
-    const labels: Record<string, string> = { ...extraLabels, ...extraAnnotations };
-    if (CLUSTER_NAME) labels.cluster = CLUSTER_NAME;
-    if (CLUSTER_ID) labels.clusterId = CLUSTER_ID;
-    if (Object.keys(labels).length > 0) {
-        url.searchParams.set("labels", JSON.stringify(labels));
-    }
-
-    url.searchParams.set("isCurrent", "true");
+    url.searchParams.set("namespace", workload.namespace);
+    url.searchParams.set("workloadName", workload.workloadName);
+    // Omitted when `ownerReferences` did not resolve. The server stores NULL
+    // rather than the literal "Pod", which would produce a wrong remediation
+    // command for anything that is not one.
+    if (workload.workloadKind) url.searchParams.set("workloadKind", workload.workloadKind);
+    url.searchParams.set("containerName", workload.containerName);
+    if (workload.imageTag) url.searchParams.set("tag", workload.imageTag);
 
     const sbomBytes = fs.readFileSync(sbomFile);
     const blob = new Blob([sbomBytes], { type: "application/json" });
 
     log.info(
-        { url: url.origin + url.pathname, projectName, groupName, sbomBytes: sbomBytes.byteLength },
+        {
+            url: url.origin + url.pathname,
+            imageDigest: image.imageDigest,
+            namespace: workload.namespace,
+            workload: workload.workloadName,
+            sbomBytes: sbomBytes.byteLength,
+        },
         "uploading SBOM",
     );
 
@@ -184,6 +207,15 @@ export async function uploadSBOM(
         body: blob,
     });
 
+    /* Another scanner reached this digest first. That is the dedup check
+       racing, not a failure: the image is scanned either way, and treating it
+       as an error would fill the log with noise on every cold start of a fleet
+       that shares base images. */
+    if (response.status === 409) {
+        log.debug({ imageDigest: image.imageDigest }, "image already has an SBOM, skipping");
+        return;
+    }
+
     if (!response.ok) {
         const text = await response.text();
         throw new Error(`HTTP ${response.status}: ${text}`);
@@ -193,22 +225,23 @@ export async function uploadSBOM(
 // ─── Inventory ───────────────────────────────────────────────────────────────
 
 // Defined beside `buildInventory`, which is what produces it.
-export type { InventoryWorkload };
+export type { InventoryReport };
 
 /**
- * Reports every workload currently running, ahead of scanning any of them.
+ * Report everything the informer can see.
  *
- * The informer knows the whole cluster within seconds of startup, while image
- * pull plus syft takes minutes for a large fleet — this is what lets the
- * Dashboard show "47 discovered, 6 scanned, 41 in progress" instead of nothing
- * at all until the first SBOM lands.
+ * Under ADR 0004 this is no longer only a progress hint — it is the **primary
+ * write path** for namespaces, workloads, containers and Helm releases on the
+ * control plane. It is still the thing that turns the first minutes (image pull
+ * plus syft, before any SBOM exists) from a blank screen into a count that
+ * fills in, but now it also carries the deployment context an SBOM must not.
  *
  * The report is the complete set, not a delta: the server replaces the
  * cluster's inventory with it, which is also how a removed workload disappears.
- * Failures are the caller's to log and drop — an inventory report is a progress
- * hint, and must never take down a scanner that is otherwise scanning fine.
+ * Failures are the caller's to log and drop — losing an inventory report must
+ * never take down a scanner that is otherwise scanning fine.
  */
-export async function reportInventory(workloads: InventoryWorkload[]): Promise<void> {
+export async function reportInventory(report: InventoryReport): Promise<void> {
     const url = `${API_URL}/v1/inventory`;
     const response = await fetchWithRetry(url, {
         method: "POST",
@@ -216,14 +249,19 @@ export async function reportInventory(workloads: InventoryWorkload[]): Promise<v
             "Content-Type": "application/json",
             "X-API-Key": API_KEY!,
         },
-        body: JSON.stringify({ workloads }),
+        body: JSON.stringify(report),
     });
 
-    // A control plane older than this scanner has no such route. Scanners and
-    // the server are released independently, so that is a normal deployment
-    // state and not something to warn about on every interval.
+    // A control plane older than this scanner has no such route, or has one that
+    // speaks v1 and rejects this body. Scanners and the server release
+    // independently, so both are normal deployment states — log once per
+    // interval at a level that does not read as an outage, and keep scanning.
     if (response.status === 404) {
         log.debug("inventory endpoint not available on this control plane, skipping");
+        return;
+    }
+    if (response.status === 400) {
+        log.warn({ detail: await response.text() }, "inventory report rejected by control plane, skipping");
         return;
     }
 
@@ -231,5 +269,15 @@ export async function reportInventory(workloads: InventoryWorkload[]): Promise<v
         throw new Error(`HTTP ${response.status}: ${await response.text()}`);
     }
 
-    log.info({ workloads: workloads.length }, "inventory reported");
+    const body = await response.json().catch(() => null) as
+        | { accepted?: Record<string, number>; warnings?: { code: string; count?: number }[] }
+        | null;
+
+    // Log what *landed*, not what was sent, and surface the warnings —
+    // "12 workloads with an unresolved kind" is a coverage caveat, not a
+    // detail to bury.
+    log.info(
+        { accepted: body?.accepted, warnings: body?.warnings },
+        "inventory reported",
+    );
 }

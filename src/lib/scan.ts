@@ -5,6 +5,7 @@ import * as os from "os";
 import * as path from "path";
 import { promisify } from "util";
 import { log } from "./logger.js";
+import { parseImageRef } from "../parse-image-ref.js";
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 
@@ -102,7 +103,17 @@ export interface ImageInfo {
     namespace: string;
     workloadName: string;
     containerName: string;
-    workloadKind: string;
+    /**
+     * Resolved from `ownerReferences`. **`null` when the chain dead-ends** —
+     * never the literal `"Pod"` unless the pod genuinely has no owner. A
+     * guessed kind becomes a wrong `kubectl set image deployment/x` for a
+     * StatefulSet, which is worse than admitting we do not know.
+     */
+    workloadKind: string | null;
+    /** Init containers run, so their images can be vulnerable, but they do not serve traffic. */
+    init: boolean;
+    /** Earliest pod start, for "days exposed". */
+    startedAt: Date | undefined;
     podLabels: Record<string, string>;
     podAnnotations: Record<string, string>;
     imagePullSecrets: string[];
@@ -277,6 +288,52 @@ export function deriveWorkloadName(
     return podName.replace(/(-(?=[a-z0-9]*[0-9])[a-z0-9]{4,10}){1,2}$/, "") || podName;
 }
 
+// ─── Owner resolution ────────────────────────────────────────────────────────
+
+/**
+ * The controller a pod belongs to, from `ownerReferences` alone.
+ *
+ * **No extra RBAC and no API calls.** The reference itself carries `kind` and
+ * `name`, which is all that is needed — reading the controller objects would
+ * mean asking customers for `deployments: get` across the fleet to learn
+ * something already in the pod.
+ *
+ * The one inference is ReplicaSet → Deployment. A ReplicaSet created by a
+ * Deployment is named `<deployment>-<pod-template-hash>`, and the hash is on the
+ * pod as the `pod-template-hash` label, so the Deployment's name is the RS name
+ * with that suffix removed. When the label is absent the ReplicaSet was not
+ * created by a Deployment (or we cannot prove it was), and the honest answer is
+ * `ReplicaSet` with its own name rather than a Deployment we invented.
+ *
+ * A Job-owned pod reports `Job`, not `CronJob`: resolving the second hop needs
+ * the Job object, and `Job` is true where `CronJob` might not be.
+ *
+ * A pod with no owner at all is genuinely a bare Pod, and that is the only case
+ * that reports `"Pod"`.
+ */
+export function resolveOwner(pod: k8s.V1Pod): { kind: string | null; name: string } {
+    const fallbackName = pod.metadata?.name ?? "";
+    const refs = pod.metadata?.ownerReferences ?? [];
+    const owner = refs.find((r) => r.controller) ?? refs[0];
+
+    if (!owner?.kind || !owner.name) {
+        // No owner: a bare pod. `deriveWorkloadName` still strips what looks
+        // like a generated suffix, because a bare pod created by hand from a
+        // template is common enough to be worth collapsing.
+        return { kind: refs.length === 0 ? "Pod" : null, name: deriveWorkloadName(fallbackName, pod.metadata?.labels) };
+    }
+
+    if (owner.kind === "ReplicaSet") {
+        const hash = pod.metadata?.labels?.["pod-template-hash"];
+        if (hash && owner.name.endsWith(`-${hash}`)) {
+            return { kind: "Deployment", name: owner.name.slice(0, -(hash.length + 1)) };
+        }
+        return { kind: "ReplicaSet", name: owner.name };
+    }
+
+    return { kind: owner.kind, name: owner.name };
+}
+
 // ─── Registry auth ───────────────────────────────────────────────────────────
 
 export async function resolveRegistryAuth(
@@ -419,14 +476,19 @@ export function podImages(pod: k8s.V1Pod): ImageInfo[] {
     const phase = pod.status?.phase;
     if (phase !== "Running" && phase !== "Succeeded" && phase !== "Failed") return [];
 
+    /* Init containers are tagged rather than merged. They run, so their images
+       can be vulnerable, but they are not serving traffic — the flag lets the
+       control plane rank them differently instead of guessing from the name. */
     const allStatuses = [
-        ...(pod.status?.containerStatuses ?? []),
-        ...(pod.status?.initContainerStatuses ?? []),
+        ...(pod.status?.containerStatuses ?? []).map((cs) => ({ cs, init: false })),
+        ...(pod.status?.initContainerStatuses ?? []).map((cs) => ({ cs, init: true })),
     ];
 
     const images: ImageInfo[] = [];
+    const owner = resolveOwner(pod);
+    const startedAt = pod.status?.startTime ? new Date(pod.status.startTime) : undefined;
 
-    for (const cs of allStatuses) {
+    for (const { cs, init } of allStatuses) {
         const isActive = cs.state?.running || cs.state?.terminated;
         if (!cs.imageID || !isActive) continue;
 
@@ -454,7 +516,6 @@ export function podImages(pod: k8s.V1Pod): ImageInfo[] {
             : `${cs.image}@${digest}`;
 
         const rawLabels = pod.metadata?.labels;
-        const workloadName = deriveWorkloadName(pod.metadata?.name ?? "", rawLabels);
         const pullSecrets = (pod.spec?.imagePullSecrets ?? [])
             .map((s) => s.name)
             .filter((n): n is string => Boolean(n));
@@ -464,9 +525,13 @@ export function podImages(pod: k8s.V1Pod): ImageInfo[] {
             displayName: cs.image ?? pullRef,
             digest,
             namespace,
-            workloadName,
-            containerName: cs.name ?? workloadName,
-            workloadKind: "Pod",
+            // The owner's real name, not a regex guess at what the pod-name
+            // suffix might have been.
+            workloadName: owner.name,
+            containerName: cs.name ?? owner.name,
+            workloadKind: owner.kind,
+            init,
+            startedAt,
             podLabels: pickPodLabels(rawLabels),
             podAnnotations: pickPodAnnotations(pod.metadata?.annotations),
             imagePullSecrets: pullSecrets,
@@ -479,37 +544,214 @@ export function podImages(pod: k8s.V1Pod): ImageInfo[] {
 // ─── Inventory ───────────────────────────────────────────────────────────────
 
 /**
- * One container the informer can see. Named the same way the SBOM upload names
- * it, so the control plane can line a discovered workload up with the project
- * it becomes.
+ * The `POST /v1/inventory` v2 payload.
+ *
+ * Derived from `sbom-tracker/docs/contracts/inventory-v2.md`, which is the
+ * shared definition both repos encode. Change the contract first.
  */
-export interface InventoryWorkload {
-    namespace: string;
-    workloadName: string;
-    containerName: string;
+
+export const INVENTORY_VERSION = 2;
+
+export interface InventoryContainer {
+    name: string;
+    init: boolean;
     imageRef: string;
-    imageDigest?: string | undefined;
+    imageDigest: string;
+    /** `null` for a digest-pinned deployment. Never `"latest"`. */
+    imageTag: string | null;
+    registry: string | null;
+    repository: string | null;
+    /** Pods **observed** running this container on this digest. */
+    runningPods: number;
+}
+
+export interface InventoryWorkload {
+    /** `null` when `ownerReferences` could not be resolved. */
+    kind: string | null;
+    name: string;
+    release: { name: string; namespace: string } | null;
+    runningPods: number;
+    firstStartedAt: string | null;
+    labels: Record<string, string> | null;
+    containers: InventoryContainer[];
+}
+
+export interface InventoryNamespace {
+    name: string;
+    /** `null` = not collected. Phase 2 of `deployment-context-collection.md`. */
+    labels: Record<string, string> | null;
+    workloads: InventoryWorkload[];
+}
+
+export interface InventoryRelease {
+    name: string;
+    /** The **release's** own namespace, from `meta.helm.sh/release-namespace`. */
+    namespace: string;
+    chartName: string | null;
+    chartVersion: string | null;
+    appVersion: string | null;
+    /** Always `null` today — pod metadata cannot supply it. See phase 3. */
+    repoUrl: string | null;
+    source: "helm";
+}
+
+export interface InventoryReport {
+    version: number;
+    reportedAt: string;
+    informerSynced: boolean;
+    releases: InventoryRelease[];
+    namespaces: InventoryNamespace[];
 }
 
 /**
- * Collapses the informer's pod cache into one entry per workload container —
- * the same identity a `projects` row gets on upload, so ten replicas of a
- * Deployment are one discovered workload rather than ten.
+ * Split `helm.sh/chart` into a chart name and version.
+ *
+ * The label is `<name>-<version>` with no delimiter of its own, and chart names
+ * legitimately contain hyphens (`kube-prometheus-stack-51.2.0`). So the split
+ * is at the last hyphen whose tail begins a plausible version — a digit, or a
+ * `v` followed by one. Anything else is a chart name with no version in it,
+ * which is a real case for locally-built charts.
  */
-export function buildInventory(pods: readonly k8s.V1Pod[]): InventoryWorkload[] {
-    const byIdentity = new Map<string, InventoryWorkload>();
-    for (const pod of pods) {
-        for (const info of podImages(pod)) {
-            const key = `${info.namespace}\u0000${info.workloadName}\u0000${info.containerName}`;
-            if (byIdentity.has(key)) continue;
-            byIdentity.set(key, {
-                namespace: info.namespace,
-                workloadName: info.workloadName,
-                containerName: info.containerName,
-                imageRef: info.pullRef,
-                imageDigest: info.digest,
-            });
+export function parseHelmChartLabel(label: string | undefined): {
+    chartName: string | null;
+    chartVersion: string | null;
+} {
+    if (!label) return { chartName: null, chartVersion: null };
+
+    for (let i = label.lastIndexOf("-"); i > 0; i = label.lastIndexOf("-", i - 1)) {
+        const tail = label.slice(i + 1);
+        if (/^v?\d/.test(tail)) {
+            return { chartName: label.slice(0, i), chartVersion: tail };
         }
     }
-    return [...byIdentity.values()];
+    return { chartName: label, chartVersion: null };
+}
+
+/** The Helm release a pod belongs to, from annotations the agent already keeps. */
+function releaseForPod(info: ImageInfo): InventoryRelease | null {
+    const name = info.podAnnotations["meta.helm.sh/release-name"];
+    /* The *release's* namespace, not the workload's. A chart may deploy
+       resources into other namespaces, and keying on the workload's namespace
+       silently splits one release into several. Falling back to the workload's
+       namespace only when the annotation is missing entirely — which means Helm
+       did not write it, so there is no release. */
+    const namespace = info.podAnnotations["meta.helm.sh/release-namespace"];
+    if (!name || !namespace) return null;
+
+    const { chartName, chartVersion } = parseHelmChartLabel(info.podLabels["helm.sh/chart"]);
+
+    return {
+        name,
+        namespace,
+        chartName,
+        chartVersion,
+        appVersion: info.podLabels["app.kubernetes.io/version"] ?? null,
+        // Pod metadata cannot supply it, and `null` means unknown rather than
+        // "no repo". Without it, fleet-wide "all releases of chart X" is a name
+        // match — see phase 3.
+        repoUrl: null,
+        source: "helm",
+    };
+}
+
+const releaseKey = (namespace: string, name: string) => `${namespace}\u0000${name}`;
+
+/**
+ * Collapse the informer's pod cache into one inventory report.
+ *
+ * Two aggregation rules, and both matter:
+ *
+ * - **Workloads collapse across replicas.** Ten pods of a Deployment are one
+ *   workload with `runningPods: 10`, not ten workloads.
+ * - **Containers collapse per `(name, digest)`, not per name.** During a
+ *   rollout one container name legitimately runs two digests, and reporting a
+ *   single row would hide the half of the fleet still on the old image. That
+ *   state is exactly what "is the fix deployed?" reads, so the counts are per
+ *   triple and do not have to sum to the workload's.
+ */
+export function buildInventory(pods: readonly k8s.V1Pod[]): InventoryReport {
+    const releases = new Map<string, InventoryRelease>();
+    const namespaces = new Map<string, InventoryNamespace>();
+    // `namespace\0kind\0name` → workload, and the pod identities counted into it.
+    const workloads = new Map<string, { workload: InventoryWorkload; pods: Set<string> }>();
+    const containers = new Map<string, InventoryContainer>();
+
+    for (const pod of pods) {
+        const podId = `${pod.metadata?.namespace ?? ""}/${pod.metadata?.name ?? ""}`;
+        for (const info of podImages(pod)) {
+            if (!info.digest) continue;
+
+            let ns = namespaces.get(info.namespace);
+            if (!ns) {
+                // `null`, not `{}`: namespace labels need `namespaces: list`
+                // RBAC the agent does not have yet, and reporting `{}` would
+                // make a missing permission look like an unlabelled namespace.
+                ns = { name: info.namespace, labels: null, workloads: [] };
+                namespaces.set(info.namespace, ns);
+            }
+
+            const release = releaseForPod(info);
+            if (release) releases.set(releaseKey(release.namespace, release.name), release);
+
+            const wKey = `${info.namespace}\u0000${info.workloadKind ?? ""}\u0000${info.workloadName}`;
+            let entry = workloads.get(wKey);
+            if (!entry) {
+                const workload: InventoryWorkload = {
+                    kind: info.workloadKind,
+                    name: info.workloadName,
+                    release: release ? { name: release.name, namespace: release.namespace } : null,
+                    runningPods: 0,
+                    firstStartedAt: info.startedAt?.toISOString() ?? null,
+                    labels: Object.keys(info.podLabels).length > 0 ? info.podLabels : null,
+                    containers: [],
+                };
+                entry = { workload, pods: new Set() };
+                workloads.set(wKey, entry);
+                ns.workloads.push(workload);
+            }
+            entry.pods.add(podId);
+
+            // Earliest pod start across the replicas — how long this has been
+            // running, not how long the pod we happened to see first has.
+            const started = info.startedAt?.toISOString() ?? null;
+            if (started && (!entry.workload.firstStartedAt || started < entry.workload.firstStartedAt)) {
+                entry.workload.firstStartedAt = started;
+            }
+
+            const cKey = `${wKey}\u0000${info.containerName}\u0000${info.digest}`;
+            let container = containers.get(cKey);
+            if (!container) {
+                const parsed = parseImageRef(info.displayName);
+                container = {
+                    name: info.containerName,
+                    init: info.init,
+                    imageRef: info.pullRef,
+                    imageDigest: info.digest,
+                    imageTag: parsed.tag ?? null,
+                    registry: parsed.registry ?? null,
+                    repository: parsed.projectName || null,
+                    runningPods: 0,
+                };
+                containers.set(cKey, container);
+                entry.workload.containers.push(container);
+            }
+            container.runningPods += 1;
+        }
+    }
+
+    for (const { workload, pods: seen } of workloads.values()) {
+        workload.runningPods = seen.size;
+    }
+
+    return {
+        version: INVENTORY_VERSION,
+        // Advisory only — the server stamps rows with its own clock, because
+        // producer clocks skew.
+        reportedAt: new Date().toISOString(),
+        // Overridden by the caller when the informer has not finished its
+        // initial sync; see `watch.ts`.
+        informerSynced: true,
+        releases: [...releases.values()],
+        namespaces: [...namespaces.values()],
+    };
 }

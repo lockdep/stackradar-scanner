@@ -18,6 +18,55 @@ Removed, Fixed, Security — so use those six and nothing else.
 
 ## [Unreleased]
 
+### Changed
+
+- **The agent now scans each image once for the whole cluster, not once per
+  place it runs.** An image deployed into five namespaces used to mean five
+  pulls, five syft runs and five uploads of an identical component list; it is
+  now one of each. On a fleet that shares base images this is the difference
+  between minutes and tens of minutes for a first scan, and it scales with how
+  much your images have in common rather than with how many workloads you run.
+
+  Nothing to configure. If you set `SEEN_DIGESTS_MAX`, note that it now counts
+  distinct images rather than image-and-place pairs, so the default goes much
+  further than it used to.
+
+- **Workload inventory reports now carry deployment context**, and are the
+  agent's primary way of telling StackRadar what is running. Each report
+  describes namespaces, workloads and containers as the nested things they are,
+  rather than a flat list of `<workload>/<container>` strings, and adds:
+
+  - the **workload kind** — Deployment, StatefulSet, DaemonSet, Job — resolved
+    from `ownerReferences` instead of being reported as `Pod` for everything.
+    This is what makes a remediation command correct: `kubectl set image
+    deployment/x` is actively wrong for a StatefulSet. Where the owner chain
+    cannot be resolved the kind is reported as unknown rather than guessed.
+  - the **workload's real name** from its owner, instead of a regex guess at
+    which part of the pod name was a generated suffix.
+  - **observed running pods**, per workload and per image. During a rollout a
+    Deployment running two images is reported as exactly that, so "is the fix
+    deployed?" has an honest answer while it is still half-finished.
+  - the **Helm release and chart** a workload belongs to, from labels and
+    annotations the agent already collects — so StackRadar can group by chart
+    alongside namespace and image.
+  - an **init-container flag**, so images that run but do not serve traffic can
+    be ranked differently.
+
+  Still no new RBAC: all of it comes from the pod informer the agent already
+  runs.
+
+  Requires a control plane that accepts inventory v2. Against an older one the
+  report is rejected and logged once per interval — **SBOM upload is
+  unaffected**, so an agent ahead of its control plane keeps finding
+  vulnerabilities while the inventory waits.
+
+### Removed
+
+- Pod labels and annotations are no longer sent with the SBOM. They are facts
+  about a deployment, not about an image, and an SBOM carrying your release
+  names cannot be shared the way a public image's SBOM can. The same
+  breadcrumbs now ride the inventory report instead, where they belong.
+
 ## [0.1.3] - 2026-08-14
 
 ### Added
