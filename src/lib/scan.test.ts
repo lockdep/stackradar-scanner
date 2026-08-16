@@ -4,8 +4,14 @@ import { log } from "./logger.js";
 import {
     RELEVANT_POD_LABEL_KEYS,
     RELEVANT_POD_ANNOTATION_KEYS,
+    RELEVANT_OWNER_LABEL_KEYS,
+    RELEVANT_OWNER_ANNOTATION_KEYS,
     pickPodLabels,
     pickPodAnnotations,
+    pickOwnerLabels,
+    pickOwnerAnnotations,
+    mergedMetadata,
+    parseArgocdTrackingId,
     deriveWorkloadName,
     shouldScan,
     stripTagAndDigest,
@@ -39,8 +45,42 @@ describe("the label and annotation allowlists", () => {
         `);
     });
 
+    // `argocd.argoproj.io/tracking-id` is deliberately absent. It sat here from
+    // phase 1 and never once matched: ArgoCD annotates the objects it applies,
+    // and nothing propagates that to the pod template. It lives in the owner
+    // allowlist below, where it is actually written.
     it("keeps exactly these pod annotations", () => {
         expect([...RELEVANT_POD_ANNOTATION_KEYS].sort()).toMatchInlineSnapshot(`
+          [
+            "meta.helm.sh/release-name",
+            "meta.helm.sh/release-namespace",
+          ]
+        `);
+    });
+
+    // The same boundary one object up. Spelled out separately from the pod sets
+    // rather than derived from them, so widening either one is its own diff.
+    it("keeps exactly these controller labels", () => {
+        expect([...RELEVANT_OWNER_LABEL_KEYS].sort()).toMatchInlineSnapshot(`
+          [
+            "app",
+            "app.kubernetes.io/component",
+            "app.kubernetes.io/instance",
+            "app.kubernetes.io/managed-by",
+            "app.kubernetes.io/name",
+            "app.kubernetes.io/part-of",
+            "app.kubernetes.io/version",
+            "chart",
+            "helm.sh/chart",
+            "heritage",
+            "release",
+            "version",
+          ]
+        `);
+    });
+
+    it("keeps exactly these controller annotations", () => {
+        expect([...RELEVANT_OWNER_ANNOTATION_KEYS].sort()).toMatchInlineSnapshot(`
           [
             "argocd.argoproj.io/tracking-id",
             "meta.helm.sh/release-name",
@@ -110,6 +150,115 @@ describe("pickPodAnnotations", () => {
     it("returns an empty object for undefined annotations", () => {
         expect(pickPodAnnotations(undefined)).toEqual({});
     });
+});
+
+describe("pickOwnerLabels / pickOwnerAnnotations", () => {
+    it("keeps every allowlisted key", () => {
+        const labels = Object.fromEntries(
+            [...RELEVANT_OWNER_LABEL_KEYS].map((k) => [k, `value-of-${k}`])
+        );
+        const annotations = Object.fromEntries(
+            [...RELEVANT_OWNER_ANNOTATION_KEYS].map((k) => [k, `value-of-${k}`])
+        );
+        expect(pickOwnerLabels(labels)).toEqual(labels);
+        expect(pickOwnerAnnotations(annotations)).toEqual(annotations);
+    });
+
+    /* The whole reason the agent now reads controllers is metadata like
+       `kubectl.kubernetes.io/last-applied-configuration`, which sits on exactly
+       these objects and contains the entire spec. Nothing outside the
+       allowlist leaves the cluster. */
+    it("drops controller metadata that is not allowlisted", () => {
+        expect(
+            pickOwnerLabels({
+                "helm.sh/chart": "redis-18.2.1",
+                "customer.internal/cost-centre": "acme-holdings-emea",
+            })
+        ).toEqual({ "helm.sh/chart": "redis-18.2.1" });
+
+        expect(
+            pickOwnerAnnotations({
+                "meta.helm.sh/release-name": "prod-redis",
+                "kubectl.kubernetes.io/last-applied-configuration": "{\"spec\":{}}",
+                "deployment.kubernetes.io/revision": "4",
+            })
+        ).toEqual({ "meta.helm.sh/release-name": "prod-redis" });
+    });
+
+    it("returns an empty object for undefined input", () => {
+        expect(pickOwnerLabels(undefined)).toEqual({});
+        expect(pickOwnerAnnotations(undefined)).toEqual({});
+    });
+});
+
+describe("mergedMetadata", () => {
+    const info = (over: Partial<Parameters<typeof mergedMetadata>[0]>) => ({
+        podLabels: {},
+        podAnnotations: {},
+        ownerLabels: {},
+        ownerAnnotations: {},
+        ...over,
+    } as Parameters<typeof mergedMetadata>[0]);
+
+    /* The invariant that makes reading the controller incapable of *changing*
+       an attribution that already worked: it can only ever fill in a key the
+       pod never carried. */
+    it("never lets owner metadata override a pod key of the same name", () => {
+        const merged = mergedMetadata(info({
+            podLabels: { "app.kubernetes.io/instance": "from-pod" },
+            ownerLabels: { "app.kubernetes.io/instance": "from-controller" },
+            podAnnotations: { "meta.helm.sh/release-name": "from-pod" },
+            ownerAnnotations: { "meta.helm.sh/release-name": "from-controller" },
+        }));
+
+        expect(merged.labels["app.kubernetes.io/instance"]).toBe("from-pod");
+        expect(merged.annotations["meta.helm.sh/release-name"]).toBe("from-pod");
+    });
+
+    it("fills in the keys the pod does not carry", () => {
+        const merged = mergedMetadata(info({
+            podLabels: { "app.kubernetes.io/managed-by": "prometheus-operator" },
+            ownerLabels: { heritage: "Helm", release: "kube-prometheus-stack" },
+            ownerAnnotations: { "argocd.argoproj.io/tracking-id": "app:apps/StatefulSet:ns/x" },
+        }));
+
+        expect(merged.labels).toEqual({
+            "app.kubernetes.io/managed-by": "prometheus-operator",
+            heritage: "Helm",
+            release: "kube-prometheus-stack",
+        });
+        expect(merged.annotations).toEqual({
+            "argocd.argoproj.io/tracking-id": "app:apps/StatefulSet:ns/x",
+        });
+    });
+});
+
+describe("parseArgocdTrackingId", () => {
+    it("takes the app name off the front and ignores the tracked object", () => {
+        expect(
+            parseArgocdTrackingId(
+                "kube-prometheus-stack:apps/StatefulSet:monitoring/alertmanager-kps"
+            )
+        ).toEqual({ name: "kube-prometheus-stack", namespace: null });
+    });
+
+    /* With apps-in-any-namespace enabled the first field is qualified. Without
+       it, Argo's tracking ID says nothing about where the app lives, and the
+       caller supplies the configured namespace. */
+    it("splits a namespace-qualified app reference", () => {
+        expect(
+            parseArgocdTrackingId("team-a/payments:apps/Deployment:payments/api")
+        ).toEqual({ name: "payments", namespace: "team-a" });
+    });
+
+    /* A bare string is not a tracking ID. Reading one as an app name would
+       invent a delivery layer out of an unrelated annotation value. */
+    it.each([undefined, "", "not-a-tracking-id", ":apps/Deployment:ns/x", "team-a/:x:y"])(
+        "rejects %o",
+        (value) => {
+            expect(parseArgocdTrackingId(value)).toBeNull();
+        }
+    );
 });
 
 describe("deriveWorkloadName", () => {

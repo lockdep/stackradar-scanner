@@ -29,6 +29,9 @@
         "syftTimeoutMs":           { "type": "string", "pattern": "^[0-9]+$" },
         "skipExistingDigests":     { "type": "string", "enum": ["true", "false"] },
         "resolveImagePullSecrets": { "type": "string", "enum": ["true", "false"] },
+        "resolveWorkloadOwners":   { "type": "string", "enum": ["true", "false"] },
+        "resolveArgocdApplications": { "type": "string", "enum": ["true", "false"] },
+        "argocdNamespace":         { "type": "string", "minLength": 1, "maxLength": 63 },
         "imagePullSecretNames":    { "type": "array", "items": { "type": "string" } }
       }
     },

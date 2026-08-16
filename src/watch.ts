@@ -7,6 +7,9 @@ import {
     CONCURRENT_SCANS,
     SKIP_EXISTING_DIGESTS,
     RESOLVE_IMAGE_PULL_SECRETS,
+    RESOLVE_WORKLOAD_OWNERS,
+    RESOLVE_ARGOCD_APPLICATIONS,
+    ARGOCD_NAMESPACE,
     EXCLUDE_NAMESPACES,
     INCLUDE_NAMESPACES,
     EXCLUDE_IMAGES,
@@ -20,7 +23,10 @@ import {
     podImages,
     buildInventory,
     ImageInfo,
+    InventoryContext,
 } from "./lib/scan.js";
+import { OwnerMetadataCache } from "./lib/owner-cache.js";
+import { ArgocdApplicationCache } from "./lib/argocd-applications.js";
 import { heartbeat, checkExistingSbom, uploadSBOM, reportInventory } from "./lib/client.js";
 import { configureProxy } from "./lib/proxy.js";
 import {
@@ -97,9 +103,33 @@ async function handlePod(pod: k8s.V1Pod, coreApi: k8s.CoreV1Api): Promise<void> 
  * what lets it claim `informerSynced: true`. That flag is not decoration — a
  * full-set replacement built from a half-synced informer would delete most of
  * the cluster's inventory, and the server rejects reports that admit to it.
+ *
+ * The two attribution lookups happen **here** rather than in `handlePod`. Both
+ * describe things that change on deploy, not on pod churn, and the informer
+ * calls `handlePod` on every add and update in the cluster — resolving there
+ * would multiply one Deployment's `get` by its replica count and by its restart
+ * rate, to learn something that was already known.
  */
-async function publishInventory(pods: readonly k8s.V1Pod[]): Promise<void> {
-    const report = buildInventory(pods);
+async function publishInventory(
+    pods: readonly k8s.V1Pod[],
+    owners: OwnerMetadataCache | null,
+    argocd: ArgocdApplicationCache | null,
+): Promise<void> {
+    /* `collected: false` when the lookup is switched off, which is the same
+       thing the report says for a 403: nobody looked. The alternative — quietly
+       claiming full collection — is what made the original bug invisible. */
+    const resolved = owners
+        ? await owners.resolve(pods)
+        : { owners: undefined, collected: false };
+
+    const ctx: InventoryContext = {
+        owners: resolved.owners,
+        ownerMetadataCollected: resolved.collected,
+        applications: argocd ? await argocd.list() : undefined,
+        argocdNamespace: ARGOCD_NAMESPACE,
+    };
+
+    const report = buildInventory(pods, ctx);
     if (report.namespaces.length === 0) {
         /* A report with no namespaces would be a request to wipe the cluster's
            inventory, and the server rejects it. A genuinely empty cluster is
@@ -217,6 +247,9 @@ async function main(): Promise<void> {
         concurrentScans: CONCURRENT_SCANS,
         skipExistingDigests: SKIP_EXISTING_DIGESTS,
         resolveImagePullSecrets: RESOLVE_IMAGE_PULL_SECRETS,
+        resolveWorkloadOwners: RESOLVE_WORKLOAD_OWNERS,
+        resolveArgocdApplications: RESOLVE_ARGOCD_APPLICATIONS,
+        argocdNamespace: RESOLVE_ARGOCD_APPLICATIONS ? ARGOCD_NAMESPACE : undefined,
         sweepIntervalMs: SWEEP_INTERVAL_MS || "disabled",
         healthPort: HEALTH_PORT,
     }, "StackRadar cluster watcher starting");
@@ -233,6 +266,15 @@ async function main(): Promise<void> {
 
     const kc = loadKubeConfig();
     const coreApi = kc.makeApiClient(k8s.CoreV1Api);
+
+    /* Built once and kept: both memoise across reports, which is what keeps a
+       500-pod cluster at one `get` per controller for the life of the process
+       rather than one per report. `null` when switched off — a distinct state
+       from "resolved nothing", and the one the report tells the server about. */
+    const owners = RESOLVE_WORKLOAD_OWNERS ? new OwnerMetadataCache(kc) : null;
+    const argocd = RESOLVE_ARGOCD_APPLICATIONS
+        ? new ArgocdApplicationCache(kc, ARGOCD_NAMESPACE)
+        : null;
 
     await heartbeat();
 
@@ -275,7 +317,7 @@ async function main(): Promise<void> {
        so its cache is the whole cluster. Reporting it here is what turns the
        first minutes — image pull plus syft, before any SBOM exists — from a
        blank screen into a count that fills in. */
-    await publishInventory(informer.list());
+    await publishInventory(informer.list(), owners, argocd);
 
     setInterval(() => {
         heartbeat().catch((err) =>
@@ -283,7 +325,7 @@ async function main(): Promise<void> {
         );
         // Same cadence, because the report is a full set replacement and this
         // is how a scaled-down or deleted workload leaves the inventory.
-        void publishInventory(informer.list());
+        void publishInventory(informer.list(), owners, argocd);
     }, HEARTBEAT_INTERVAL_MS);
 
     if (SWEEP_INTERVAL_MS > 0) {

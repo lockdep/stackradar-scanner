@@ -28,6 +28,38 @@ rules:
       {{- toYaml . | nindent 6 }}
     {{- end }}
   {{- end }}
+  {{- if eq (.Values.scanner.resolveWorkloadOwners | toString) "true" }}
+  # Read the metadata of the object a pod belongs to.
+  #
+  # `get` only — no `list`, no `watch`, and one request per distinct controller
+  # for the life of the process. The agent asks for `PartialObjectMetadata`, so
+  # what comes back is labels and annotations; the pod spec never crosses the
+  # wire.
+  #
+  # Needed because the pod is the one object in the chain that usually does not
+  # carry chart context: Helm writes `meta.helm.sh/release-*` on the objects it
+  # applies and never on the pod template, and an operator that generates a
+  # StatefulSet from a CR writes its own labels for the pods it manages. Without
+  # this rule, chart-managed workloads are reported as unmanaged.
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "daemonsets", "replicasets"]
+    verbs: ["get"]
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["get"]
+  {{- end }}
+  {{- if eq (.Values.scanner.resolveArgocdApplications | toString) "true" }}
+  # Read ArgoCD Application objects for the repository URL and target revision
+  # behind a GitOps-delivered workload — the only source in the cluster for
+  # either, and for an Argo user the place a chart upgrade is actually made.
+  #
+  # `list` only, in `scanner.argocdNamespace` alone. A ClusterRole has no
+  # namespace to scope to, so the narrowing is in the agent rather than in RBAC;
+  # a cluster with no ArgoCD answers 404 once and is never asked again.
+  - apiGroups: ["argoproj.io"]
+    resources: ["applications"]
+    verbs: ["list"]
+  {{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

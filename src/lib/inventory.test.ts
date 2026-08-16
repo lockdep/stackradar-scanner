@@ -1,6 +1,13 @@
 import { describe, it, expect } from "vitest";
 import * as k8s from "@kubernetes/client-node";
-import { buildInventory, parseHelmChartLabel, podImages, resolveOwner } from "./scan.js";
+import {
+    buildInventory,
+    ownerKey,
+    parseHelmChartLabel,
+    podImages,
+    resolveOwner,
+    type OwnerMetadataLookup,
+} from "./scan.js";
 
 const DIGEST_A = "sha256:" + "a".repeat(64);
 const DIGEST_B = "sha256:" + "b".repeat(64);
@@ -51,6 +58,26 @@ function pod(options: PodOptions): k8s.V1Pod {
             })),
         },
     } as k8s.V1Pod;
+}
+
+/**
+ * A one-entry controller-metadata lookup, keyed the way `podImages` looks it up.
+ *
+ * Built by hand rather than by mocking the API: the interesting behaviour is
+ * what the *rule* does with the labels, and `owner-cache.test.ts` covers the
+ * fetching separately.
+ */
+function owners(entry: {
+    namespace: string;
+    kind: string;
+    name: string;
+    labels?: Record<string, string>;
+    annotations?: Record<string, string>;
+}): OwnerMetadataLookup {
+    return new Map([[
+        ownerKey(entry.namespace, entry.kind, entry.name),
+        { labels: entry.labels ?? {}, annotations: entry.annotations ?? {} },
+    ]]);
 }
 
 /** A pod owned by a Deployment, spelled the way Kubernetes actually spells it. */
@@ -141,9 +168,9 @@ describe("parseHelmChartLabel", () => {
  * (replicas collapse, digests do not) hold.
  */
 describe("buildInventory", () => {
-    it("declares version 2 and a synced informer", () => {
+    it("declares version 3 and a synced informer", () => {
         const report = buildInventory([deploymentPod("api-7d9f8b6c4d-abcde", "api", "7d9f8b6c4d")]);
-        expect(report.version).toBe(2);
+        expect(report.version).toBe(3);
         expect(report.informerSynced).toBe(true);
         expect(report.reportedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
     });
@@ -277,7 +304,6 @@ describe("buildInventory", () => {
                 // Pod metadata cannot supply it, and null means unknown, not
                 // "no repo".
                 repoUrl: null,
-                source: "helm",
             }]);
             expect(report.namespaces[0]!.workloads[0]!.release).toEqual({ name: "prod-redis", namespace: "prod" });
         });
@@ -318,7 +344,6 @@ describe("buildInventory", () => {
                 chartVersion: "v1.19.2",
                 appVersion: "v1.19.2",
                 repoUrl: null,
-                source: "helm",
             }]);
             expect(report.namespaces[0]!.workloads[0]!.release)
                 .toEqual({ name: "cert-manager", namespace: "cert-manager" });
@@ -344,7 +369,6 @@ describe("buildInventory", () => {
                 chartVersion: "82.18.0",
                 appVersion: null,
                 repoUrl: null,
-                source: "helm",
             }]);
         });
 
@@ -352,9 +376,10 @@ describe("buildInventory", () => {
          * prometheus-operator stamps `app.kubernetes.io/instance` on pods of
          * StatefulSets it generates itself. Trusting `instance` unconditionally
          * would invent `kube-prometheus-stack-alertmanager` as a release that
-         * no `helm list` will ever show.
+         * no `helm list` will ever show — so an instance label on its own,
+         * with nothing anywhere saying Helm, is not evidence of a release.
          */
-        it("ignores an instance label owned by a controller that is not Helm", () => {
+        it("reports no release for an instance label with no Helm evidence behind it", () => {
             const report = buildInventory([
                 pod({
                     name: "alertmanager-kube-prometheus-stack-alertmanager-0",
@@ -408,6 +433,387 @@ describe("buildInventory", () => {
         });
     });
 
+    /*
+     * The reported bug, and the class of failure behind it: the pod is the one
+     * object in the chain that usually does *not* carry chart context, so
+     * everything here is about evidence found one hop up.
+     */
+    describe("releases derived from the controller", () => {
+        /*
+         * `alertmanager-kube-prometheus-stack-alertmanager`, with the label sets
+         * measured on the dev cluster. The StatefulSet carries Helm's full
+         * pre-3.0 set; its `spec.template.metadata.labels` carries none of it,
+         * because prometheus-operator writes its own for the pods it manages.
+         */
+        const alertmanagerPod = pod({
+            name: "alertmanager-kube-prometheus-stack-alertmanager-0",
+            namespace: "monitoring",
+            ownerReferences: [{
+                kind: "StatefulSet",
+                name: "alertmanager-kube-prometheus-stack-alertmanager",
+                controller: true,
+            }],
+            labels: {
+                "app.kubernetes.io/instance": "kube-prometheus-stack-alertmanager",
+                "app.kubernetes.io/managed-by": "prometheus-operator",
+                "app.kubernetes.io/name": "alertmanager",
+            },
+        });
+
+        const alertmanagerStatefulSet = owners({
+            namespace: "monitoring",
+            kind: "StatefulSet",
+            name: "alertmanager-kube-prometheus-stack-alertmanager",
+            labels: {
+                chart: "kube-prometheus-stack-82.18.0",
+                heritage: "Helm",
+                release: "kube-prometheus-stack",
+                "app.kubernetes.io/part-of": "kube-prometheus-stack",
+                "app.kubernetes.io/managed-by": "prometheus-operator",
+            },
+        });
+
+        it("recovers the release the controller names, despite managed-by on the pod", () => {
+            const report = buildInventory([alertmanagerPod], { owners: alertmanagerStatefulSet });
+
+            expect(report.releases).toEqual([{
+                name: "kube-prometheus-stack",
+                namespace: "monitoring",
+                chartName: "kube-prometheus-stack",
+                chartVersion: "82.18.0",
+                appVersion: null,
+                repoUrl: null,
+            }]);
+            expect(report.namespaces[0]!.workloads[0]!.release)
+                .toEqual({ name: "kube-prometheus-stack", namespace: "monitoring" });
+        });
+
+        /*
+         * `app.kubernetes.io/instance` on this pod is
+         * `kube-prometheus-stack-alertmanager` — the operator being *correct*,
+         * since every instance of an application must have a unique name. Read
+         * as a release name it would split one release into three, which is
+         * precisely why `release` outranks it under corroboration.
+         */
+        it("does not name the release after the operator's instance key", () => {
+            const report = buildInventory([alertmanagerPod], { owners: alertmanagerStatefulSet });
+            expect(report.releases.map((r) => r.name)).toEqual(["kube-prometheus-stack"]);
+        });
+
+        /*
+         * The other half of the same bug: the pod knows the release but not the
+         * chart, so the release row existed and was unusable for the one thing
+         * releases are for — "what chart is this, and is there a newer one".
+         */
+        it("fills in a chart the pod does not carry", () => {
+            const report = buildInventory(
+                [pod({
+                    name: "loki-0",
+                    namespace: "monitoring",
+                    ownerReferences: [{ kind: "StatefulSet", name: "loki", controller: true }],
+                    labels: { "app.kubernetes.io/instance": "loki" },
+                })],
+                {
+                    owners: owners({
+                        namespace: "monitoring",
+                        kind: "StatefulSet",
+                        name: "loki",
+                        labels: { "helm.sh/chart": "loki-6.55.0" },
+                    }),
+                },
+            );
+
+            expect(report.releases[0]).toMatchObject({
+                name: "loki",
+                chartName: "loki",
+                chartVersion: "6.55.0",
+            });
+        });
+
+        /* Owner metadata is additive only. A pod that already knew its release
+           keeps that answer whatever the controller says. */
+        it("never lets the controller override a label the pod carries", () => {
+            const report = buildInventory(
+                [deploymentPod("api-7d9f8b6c4d-abcde", "api", "7d9f8b6c4d", {
+                    namespace: "prod",
+                    labels: {
+                        "app.kubernetes.io/instance": "from-pod",
+                        "helm.sh/chart": "api-1.0.0",
+                    },
+                })],
+                {
+                    owners: owners({
+                        namespace: "prod",
+                        kind: "Deployment",
+                        name: "api",
+                        labels: {
+                            "app.kubernetes.io/instance": "from-controller",
+                            "helm.sh/chart": "api-9.9.9",
+                        },
+                    }),
+                },
+            );
+
+            expect(report.releases[0]).toMatchObject({ name: "from-pod", chartVersion: "1.0.0" });
+        });
+
+        /*
+         * The guard must not be weakened into "any instance label is a
+         * release". With nothing anywhere saying Helm, there is no release.
+         */
+        it("still reports nothing when the controller carries no Helm evidence either", () => {
+            const report = buildInventory(
+                [pod({
+                    name: "hubble-relay-abc",
+                    namespace: "monitoring",
+                    ownerReferences: [{ kind: "Deployment", name: "hubble-relay", controller: true }],
+                    labels: { "app.kubernetes.io/instance": "hubble-relay" },
+                })],
+                {
+                    owners: owners({
+                        namespace: "monitoring",
+                        kind: "Deployment",
+                        name: "hubble-relay",
+                        labels: { "app.kubernetes.io/part-of": "cilium" },
+                    }),
+                },
+            );
+
+            expect(report.releases).toEqual([]);
+            expect(report.namespaces[0]!.workloads[0]!.release).toBeNull();
+        });
+
+        /*
+         * `managed-by` is the tool that *operates* an application, per the label
+         * spec — never the installer. It is one way to say Helm and never a way
+         * to say not-Helm.
+         */
+        it("accepts managed-by: Helm as evidence on its own", () => {
+            const report = buildInventory([
+                deploymentPod("api-7d9f8b6c4d-abcde", "api", "7d9f8b6c4d", {
+                    namespace: "prod",
+                    labels: {
+                        "app.kubernetes.io/instance": "api",
+                        "app.kubernetes.io/managed-by": "Helm",
+                    },
+                }),
+            ]);
+
+            expect(report.releases[0]).toMatchObject({ name: "api", chartName: null });
+        });
+
+        /*
+         * Unprefixed keys are private to users per the spec, so `release` names
+         * a release only when the object corroborates the Helm spelling.
+         * Uncorroborated, `release: stable` is somebody's channel marker and
+         * the prefixed label is the safer of the two.
+         */
+        it("prefers release over instance when the object corroborates Helm", () => {
+            const report = buildInventory([
+                deploymentPod("api-7d9f8b6c4d-abcde", "api", "7d9f8b6c4d", {
+                    namespace: "prod",
+                    labels: {
+                        release: "prod-api",
+                        "app.kubernetes.io/instance": "api-abcxyz",
+                        heritage: "Helm",
+                    },
+                }),
+            ]);
+
+            expect(report.releases[0]!.name).toBe("prod-api");
+        });
+
+        it("prefers instance over an uncorroborated release label", () => {
+            const report = buildInventory([
+                deploymentPod("api-7d9f8b6c4d-abcde", "api", "7d9f8b6c4d", {
+                    namespace: "prod",
+                    labels: {
+                        release: "stable",
+                        "app.kubernetes.io/instance": "prod-api",
+                        "app.kubernetes.io/managed-by": "Helm",
+                    },
+                }),
+            ]);
+
+            expect(report.releases[0]!.name).toBe("prod-api");
+        });
+
+        /* `appVersion` comes from a label charts get wrong — five of fifteen
+           releases on the dev cluster stamp the chart version into it. Equal is
+           allowed; derived is not. */
+        it("keeps appVersion and chartVersion distinct even when equal", () => {
+            const report = buildInventory([
+                deploymentPod("kps-operator-6846466799-lbjc9", "kps-operator", "6846466799", {
+                    namespace: "monitoring",
+                    labels: {
+                        "app.kubernetes.io/instance": "kube-prometheus-stack",
+                        "helm.sh/chart": "kube-prometheus-stack-82.18.0",
+                        "app.kubernetes.io/version": "82.18.0",
+                    },
+                }),
+            ]);
+
+            expect(report.releases[0]).toMatchObject({
+                chartVersion: "82.18.0",
+                appVersion: "82.18.0",
+            });
+        });
+
+        /* The merged set reaches the client, which is what lets the Unmanaged
+           bucket sub-group by `part-of` with no new column and no new table. */
+        it("reports the merged label set on the workload", () => {
+            const report = buildInventory([alertmanagerPod], { owners: alertmanagerStatefulSet });
+
+            expect(report.namespaces[0]!.workloads[0]!.labels).toEqual({
+                // the controller's
+                chart: "kube-prometheus-stack-82.18.0",
+                heritage: "Helm",
+                release: "kube-prometheus-stack",
+                "app.kubernetes.io/part-of": "kube-prometheus-stack",
+                // the pod's, winning the key both carry
+                "app.kubernetes.io/instance": "kube-prometheus-stack-alertmanager",
+                "app.kubernetes.io/managed-by": "prometheus-operator",
+                "app.kubernetes.io/name": "alertmanager",
+            });
+        });
+
+        it("reports whether the controllers could be read at all", () => {
+            const pods = [alertmanagerPod];
+            expect(buildInventory(pods, { ownerMetadataCollected: false }).ownerMetadataCollected)
+                .toBe(false);
+            expect(buildInventory(pods, { owners: alertmanagerStatefulSet }).ownerMetadataCollected)
+                .toBe(true);
+        });
+    });
+
+    /*
+     * The delivery layer. It is a sibling of the release, never a value on it:
+     * ArgoCD commonly deploys *via* Helm, so a workload legitimately has both
+     * and a single field would force a choice between two true answers.
+     */
+    describe("gitops applications", () => {
+        const trackedPod = (name: string, workload: string) =>
+            pod({
+                name,
+                namespace: "monitoring",
+                ownerReferences: [{ kind: "Deployment", name: workload, controller: true }],
+                labels: {
+                    "app.kubernetes.io/instance": "kube-prometheus-stack",
+                    "helm.sh/chart": "kube-prometheus-stack-82.18.0",
+                },
+            });
+
+        const trackingOwners = (workload: string, trackingId: string) =>
+            owners({
+                namespace: "monitoring",
+                kind: "Deployment",
+                name: workload,
+                annotations: { "argocd.argoproj.io/tracking-id": trackingId },
+            });
+
+        it("reads the tracking annotation off the controller, where it lives", () => {
+            const report = buildInventory(
+                [trackedPod("kps-operator-1", "kps-operator")],
+                {
+                    owners: trackingOwners(
+                        "kps-operator",
+                        "kube-prometheus-stack:apps/Deployment:monitoring/kps-operator"
+                    ),
+                },
+            );
+
+            expect(report.applications).toEqual([{
+                name: "kube-prometheus-stack",
+                namespace: "argocd",
+                tool: "argocd",
+                repoUrl: null,
+                targetRevision: null,
+                chart: null,
+                path: null,
+                destinationNamespace: null,
+            }]);
+            expect(report.namespaces[0]!.workloads[0]!.application)
+                .toEqual({ name: "kube-prometheus-stack", namespace: "argocd" });
+        });
+
+        /*
+         * `kube-prometheus-stack` is legitimately both a Helm release and an
+         * ArgoCD app. The two layers must not leak into each other: an app name
+         * never lands in `releases[]`, and the workload carries both references.
+         */
+        it("carries both layers for a workload that has both", () => {
+            const report = buildInventory(
+                [trackedPod("kps-operator-1", "kps-operator")],
+                {
+                    owners: trackingOwners(
+                        "kps-operator",
+                        "kube-prometheus-stack:apps/Deployment:monitoring/kps-operator"
+                    ),
+                },
+            );
+
+            expect(report.releases).toHaveLength(1);
+            expect(report.applications).toHaveLength(1);
+            expect(report.releases[0]).not.toHaveProperty("tool");
+            expect(report.namespaces[0]!.workloads[0]).toMatchObject({
+                release: { name: "kube-prometheus-stack", namespace: "monitoring" },
+                application: { name: "kube-prometheus-stack", namespace: "argocd" },
+            });
+        });
+
+        it("reports no application for a workload no GitOps tool delivers", () => {
+            const report = buildInventory([deploymentPod("api-7d9f8b6c4d-abcde", "api", "7d9f8b6c4d")]);
+            expect(report.applications).toEqual([]);
+            expect(report.namespaces[0]!.workloads[0]!.application).toBeNull();
+        });
+
+        it("honours the configured ArgoCD namespace", () => {
+            const report = buildInventory(
+                [trackedPod("kps-operator-1", "kps-operator")],
+                {
+                    owners: trackingOwners("kps-operator", "app:apps/Deployment:monitoring/kps-operator"),
+                    argocdNamespace: "gitops",
+                },
+            );
+            expect(report.applications[0]!.namespace).toBe("gitops");
+        });
+
+        /* Phase C: the Application object supplies what the annotation cannot,
+           and that is where a `targetRevision` bump — the actual fix — is made. */
+        it("enriches the application row from a resolved Application object", () => {
+            const resolved = new Map([[
+                "argocd\u0000kube-prometheus-stack",
+                {
+                    name: "kube-prometheus-stack",
+                    namespace: "argocd",
+                    tool: "argocd" as const,
+                    repoUrl: "https://prometheus-community.github.io/helm-charts",
+                    targetRevision: "82.18.0",
+                    chart: "kube-prometheus-stack",
+                    path: null,
+                    destinationNamespace: "monitoring",
+                },
+            ]]);
+
+            const report = buildInventory(
+                [trackedPod("kps-operator-1", "kps-operator")],
+                {
+                    owners: trackingOwners(
+                        "kps-operator",
+                        "kube-prometheus-stack:apps/Deployment:monitoring/kps-operator"
+                    ),
+                    applications: resolved,
+                },
+            );
+
+            expect(report.applications[0]).toMatchObject({
+                repoUrl: "https://prometheus-community.github.io/helm-charts",
+                targetRevision: "82.18.0",
+                chart: "kube-prometheus-stack",
+            });
+        });
+    });
+
     it("excludes namespaces the scanner is configured to skip", () => {
         // `kube-system` is in the default EXCLUDE_NAMESPACES set.
         const report = buildInventory([pod({ name: "coredns-abc", namespace: "kube-system", labels: { app: "coredns" } })]);
@@ -436,7 +842,7 @@ describe("buildInventory", () => {
         // Every container the inventory reports is one the scanner would also
         // try to scan; a discovered count larger than that would never converge.
         const scannable = new Set(
-            pods.flatMap(podImages).map((i) => `${i.namespace}/${i.workloadName}/${i.containerName}/${i.digest}`),
+            pods.flatMap((p) => podImages(p)).map((i) => `${i.namespace}/${i.workloadName}/${i.containerName}/${i.digest}`),
         );
         const discovered = buildInventory(pods).namespaces.flatMap((ns) =>
             ns.workloads.flatMap((w) => w.containers.map((c) => `${ns.name}/${w.name}/${c.name}/${c.imageDigest}`)),

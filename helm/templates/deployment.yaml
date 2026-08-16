@@ -173,6 +173,12 @@ spec:
               value: {{ .Values.scanner.skipExistingDigests | quote }}
             - name: RESOLVE_IMAGE_PULL_SECRETS
               value: {{ .Values.scanner.resolveImagePullSecrets | quote }}
+            - name: RESOLVE_WORKLOAD_OWNERS
+              value: {{ .Values.scanner.resolveWorkloadOwners | quote }}
+            - name: RESOLVE_ARGOCD_APPLICATIONS
+              value: {{ .Values.scanner.resolveArgocdApplications | quote }}
+            - name: ARGOCD_NAMESPACE
+              value: {{ .Values.scanner.argocdNamespace | quote }}
             {{- if .Values.dockerConfigSecret }}
             - name: DOCKER_CONFIG
               value: /home/node/.docker

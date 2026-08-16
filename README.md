@@ -68,9 +68,48 @@ Rendered from [`helm/templates/clusterrole.yaml`](helm/templates/clusterrole.yam
 | --- | --- | --- |
 | `pods` | `list`, `watch` | Discover running images; `watch` drives the real-time scanning, `list` backs the informer's initial sync and the periodic sweep |
 | `secrets` | `get` | Resolve `imagePullSecrets` so private-registry images can be pulled — [narrow this to named Secrets](#narrowing-secrets-get) or turn it off |
+| `deployments`, `statefulsets`, `daemonsets`, `replicasets`, `jobs`, `cronjobs` | `get` | Read the **metadata** of the object each pod belongs to, to recover Helm and GitOps context — [why](#why-the-agent-reads-controllers), or turn it off |
+| `applications` (`argoproj.io`) | `list` | Read the repository URL and target revision behind a GitOps-delivered workload. Silently skipped when ArgoCD is not installed |
 
-That is the whole ClusterRole. The agent reads no Deployments, StatefulSets,
-DaemonSets, CronJobs or Jobs — everything it reports is derived from pods.
+That is the whole ClusterRole. No `create`, `update`, `delete` or `patch` on
+anything, and no `watch` outside pods.
+
+### Why the agent reads controllers
+
+The pod is the one object in the chain that usually does **not** record how a
+workload was installed:
+
+- Helm writes `meta.helm.sh/release-name` onto the objects it applies — the
+  Deployment, the StatefulSet — and nothing propagates it into the pod template.
+- ArgoCD annotates what it applies, and nothing propagates that downward either.
+- An operator that generates a StatefulSet from a custom resource writes its own
+  label set for the pods it manages, dropping the chart labels on the way
+  through. `kube-prometheus-stack` is the common case.
+
+The [recommended labels](https://kubernetes.io/docs/concepts/overview/working-with-objects/common-labels/)
+convention assumes as much — "they should be applied on every resource object" —
+and the pod is simply the object furthest from the packaging decision. With pod
+metadata alone, chart-managed workloads are reported as unmanaged, which is a
+confident and wrong statement about your cluster.
+
+Three properties of the grant are worth knowing:
+
+- **`get` only, and metadata only.** The agent asks for `PartialObjectMetadata`
+  (`Accept: application/json;as=PartialObjectMetadata;g=meta.k8s.io;v=1`), so
+  the API server returns labels and annotations — never the workload spec. Then
+  the same allowlist that applies to pod metadata is applied again before
+  anything is sent.
+- **One request per controller, per process.** Reads happen on the 5-minute
+  inventory path, never on the pod watch, and are memoised until the controller
+  is replaced. A 500-pod cluster issues roughly one `get` per workload at
+  startup and roughly none afterwards.
+- **A denial degrades, it does not fail.** Without the rule the agent logs one
+  warning, falls back to pod-only attribution and keeps reporting. Turn it off
+  and the rules disappear from the ClusterRole entirely:
+
+```bash
+--set scanner.resolveWorkloadOwners=false --set scanner.resolveArgocdApplications=false
+```
 
 ### Narrowing `secrets get`
 
@@ -123,15 +162,24 @@ Sent to your StackRadar API endpoint, per image:
   `app`, `version`, `app.kubernetes.io/{name,version,component,part-of,instance,managed-by}`,
   `helm.sh/chart`, and Helm's pre-3.0 spelling of the last three,
   `release`, `chart`, `heritage`.
-- **Allowlisted pod annotations** — exactly these three:
-  `meta.helm.sh/release-name`, `meta.helm.sh/release-namespace`,
-  `argocd.argoproj.io/tracking-id`.
+- **Allowlisted pod annotations** — exactly these two:
+  `meta.helm.sh/release-name`, `meta.helm.sh/release-namespace`.
+- **The same twelve labels off the pod's controller**, plus three controller
+  annotations: the two above and `argocd.argoproj.io/tracking-id`. This is where
+  Helm and ArgoCD actually record their context — see
+  [why the agent reads controllers](#why-the-agent-reads-controllers). The pod's
+  own value always wins where both carry a key.
+- **The repository URL, chart, path and target revision** of an ArgoCD
+  `Application`, where one exists. Not its manifests, and not its sync status.
 - Your cluster ID, and the agent version in an `X-Scanner-Version` header.
 
-The allowlists are literal `Set`s in
+The four allowlists are literal `Set`s in
 [`src/lib/scan.ts`](src/lib/scan.ts) (`RELEVANT_POD_LABEL_KEYS`,
-`RELEVANT_POD_ANNOTATION_KEYS`) — a label or annotation not named there is
-dropped before anything is sent.
+`RELEVANT_POD_ANNOTATION_KEYS`, `RELEVANT_OWNER_LABEL_KEYS`,
+`RELEVANT_OWNER_ANNOTATION_KEYS`) — a label or annotation not named in one of
+them is dropped before anything is sent. They are spelled out separately rather
+than derived from one another, and snapshot-tested, so widening any one of them
+is a visible diff in a test.
 
 Separately, on startup and then on the heartbeat interval, the agent sends a
 **workload inventory**: for every container it would scan, its namespace,
@@ -152,6 +200,9 @@ anything you exclude never appears in it either.
 - **Container filesystems.** Only the package inventory syft derives from the
   image is uploaded, never file contents.
 - **Any label or annotation outside the allowlists above**, and raw pod names.
+- **Workload specs.** Controller reads ask for metadata only, so container
+  images, environment, volumes and `last-applied-configuration` are never
+  returned by the API server in the first place.
 
 ### Namespaces and images
 

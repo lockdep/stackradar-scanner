@@ -18,6 +18,96 @@ Removed, Fixed, Security — so use those six and nothing else.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Chart-managed workloads no longer show up under "Unmanaged".** 0.1.5 read
+  the Helm release off pod labels, which fixed the previous release's zero
+  findings but left a second, quieter version of the same problem: the pod is
+  the one object in the chain that usually does *not* carry chart context.
+  Helm writes `meta.helm.sh/release-name` onto the object it applies, never
+  into the pod template; ArgoCD annotates what it applies and nothing
+  propagates that downward; and an operator that generates a StatefulSet from a
+  custom resource writes its own labels for the pods it manages, dropping the
+  chart labels on the way through. On a 41-workload dev cluster that was 11
+  workloads filed as unmanaged that a chart demonstrably manages —
+  `kube-prometheus-stack`'s alertmanager and prometheus among them — plus
+  `loki` and `alloy` reported as releases with no chart name at all.
+
+  The agent now reads the **metadata** of each pod's controller and merges it
+  *under* the pod's own, so the pod still wins any key both carry. That is one
+  `get` per distinct controller for the life of the process, on the 5-minute
+  inventory path rather than the pod watch, and it asks the API server for
+  `PartialObjectMetadata` — labels and annotations, never the workload spec.
+  The same allowlist that has always applied to pod metadata is applied to it.
+
+  Two rules changed with it, both measured against the
+  [recommended labels](https://kubernetes.io/docs/concepts/overview/working-with-objects/common-labels/)
+  spec. `app.kubernetes.io/managed-by` is no longer a veto: the spec defines it
+  as the tool that *operates* an application, so `prometheus-operator` on a
+  Helm-packaged StatefulSet is a true statement rather than a contradiction,
+  and it is absent on three quarters of a typical fleet anyway. A release is
+  now claimed only on *positive* Helm evidence. And `release` — an unprefixed
+  key, which the spec says is private to users — is read as a release name only
+  when the same object corroborates it with `heritage: Helm` or a well-formed
+  chart label; uncorroborated, `app.kubernetes.io/instance` wins, so somebody's
+  `release: stable` channel marker never becomes a release name.
+
+  New RBAC: `get` on `deployments`, `statefulsets`, `daemonsets`,
+  `replicasets`, `jobs` and `cronjobs`. No `list`, no `watch`. Denied, the
+  agent logs one line and falls back to 0.1.5's behaviour rather than failing
+  the report — and the report now says which of the two happened, so
+  StackRadar can tell "no chart claims this" from "the agent was not allowed to
+  look". Turn the whole thing off with
+  `--set scanner.resolveWorkloadOwners=false` and the rules disappear from the
+  ClusterRole.
+
+### Added
+
+- **GitOps delivery is reported as its own layer, beside the chart.** A
+  workload delivered by ArgoCD and packaged by a Helm chart now carries both,
+  because both are true and each answers a different half of the same question:
+  the chart version is what a CVE advisory is written against, and the Argo
+  app's `targetRevision` is where you change it. StackRadar gains an **App**
+  grouping next to Chart; neither replaces the other, and their unattributed
+  buckets are genuinely different sets — the StackRadar agent itself has a
+  chart and no app.
+
+  `argocd.argoproj.io/tracking-id` moves from the pod-annotation allowlist to
+  the controller one, which is where ArgoCD actually writes it — it had been on
+  the pod list since the first release and had never once matched. Where the
+  `Application` object is readable, the repository URL, chart, path and target
+  revision come with it, filling in the repository URL that was `NULL` for
+  every release until now. Multi-source `Application`s (`spec.sources`) are
+  read, not just the singular `spec.source`.
+
+  New RBAC: `list` on `argoproj.io/applications`, in one namespace
+  (`scanner.argocdNamespace`, default `argocd`). A cluster with no ArgoCD
+  answers 404 once and is never asked again. `--set
+  scanner.resolveArgocdApplications=false` removes the rule.
+
+- **The unmanaged group is sub-grouped by `app.kubernetes.io/part-of`.** The
+  workloads that genuinely have no chart and no app — ArgoCD's own components,
+  cilium and its hubble siblings, the cloud provider's add-ons — are grouped by
+  the suite they belong to instead of sitting in one flat pile. Presentation
+  only: `part-of` names a suite, not a package, and it never creates a release
+  or an application row.
+
+### Changed
+
+- **Inventory payload v3.** `releases[].source` is removed — every release is a
+  Helm release now that delivery has its own `applications[]` array, and a
+  field whose only value was `"helm"` was an invitation to write `"argocd"`
+  into it later. Workloads gain an `application` reference alongside `release`,
+  and the report says whether controller metadata could be collected at all.
+  Requires a control plane that speaks v3; an older one replies 400 and the
+  agent logs it once per interval and keeps uploading SBOMs, exactly as before.
+
+- **The reported workload labels are the merged set.** Pod labels over
+  controller labels, pod winning. In practice this means
+  `app.kubernetes.io/part-of` and the chart labels now arrive for workloads
+  whose pod template never carried them. Still the same twelve-key allowlist,
+  now applied to both objects and snapshot-tested separately for each.
+
 ## [0.1.5] - 2026-08-15
 
 ### Fixed

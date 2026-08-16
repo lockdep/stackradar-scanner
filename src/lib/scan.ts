@@ -56,6 +56,36 @@ export const CONCURRENT_SCANS = Math.max(1, parseInt(process.env.CONCURRENT_SCAN
 export const SKIP_EXISTING_DIGESTS = (process.env.SKIP_EXISTING_DIGESTS ?? "true") !== "false";
 export const RESOLVE_IMAGE_PULL_SECRETS = (process.env.RESOLVE_IMAGE_PULL_SECRETS ?? "true") !== "false";
 
+/**
+ * Read the pod's controller (Deployment, StatefulSet, DaemonSet, Job, CronJob)
+ * to recover the chart context the pod template does not carry.
+ *
+ * On by default because without it the agent files chart-managed workloads under
+ * "Unmanaged" — a confident, wrong statement about the cluster. Off is the
+ * pod-only behaviour that shipped before, and a 403 degrades to it on its own.
+ */
+export const RESOLVE_WORKLOAD_OWNERS = (process.env.RESOLVE_WORKLOAD_OWNERS ?? "true") !== "false";
+
+/**
+ * Read ArgoCD `Application` objects to fill in the repository URL and target
+ * revision behind a GitOps-delivered workload.
+ *
+ * Silent when the CRD is absent — the overwhelmingly common case on a cluster
+ * with no ArgoCD — so it costs a single 404 per report there.
+ */
+export const RESOLVE_ARGOCD_APPLICATIONS = (process.env.RESOLVE_ARGOCD_APPLICATIONS ?? "true") !== "false";
+
+/**
+ * Where ArgoCD's `Application` objects live.
+ *
+ * Needed because `argocd.argoproj.io/tracking-id` names the app but not its
+ * namespace — Argo's tracking ID is `<app>:<group>/<Kind>:<ns>/<name>`, and the
+ * `<app>` half is bare unless apps-in-any-namespace is switched on. The
+ * configured value is what the agent reports until an `Application` object
+ * corrects it.
+ */
+export const ARGOCD_NAMESPACE = process.env.ARGOCD_NAMESPACE?.trim() || "argocd";
+
 export function validateConfig(): void {
     if (!API_URL || !API_KEY) {
         log.fatal("STACKRADAR_API_URL and STACKRADAR_API_KEY are required");
@@ -96,6 +126,27 @@ export function loadKubeConfig(): k8s.KubeConfig {
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
+/**
+ * The allowlisted labels and annotations of a pod's **controller**.
+ *
+ * The controller is where the packaging decision was recorded. Helm writes
+ * `meta.helm.sh/release-*` onto the objects it applies and never onto the pod
+ * template; ArgoCD annotates what it applies and nothing propagates that to the
+ * pod either; and an operator that generates a StatefulSet from a CR writes its
+ * own label set for the pods, dropping the chart labels on the way through.
+ * Reading one object further up is what recovers all three.
+ */
+export interface OwnerMetadata {
+    labels: Record<string, string>;
+    annotations: Record<string, string>;
+}
+
+/** Keyed by {@link ownerKey}. Built once per report; see `owner-cache.ts`. */
+export type OwnerMetadataLookup = ReadonlyMap<string, OwnerMetadata>;
+
+export const ownerKey = (namespace: string, kind: string, name: string) =>
+    `${namespace}\u0000${kind}\u0000${name}`;
+
 export interface ImageInfo {
     pullRef: string;
     displayName: string;
@@ -116,6 +167,15 @@ export interface ImageInfo {
     startedAt: Date | undefined;
     podLabels: Record<string, string>;
     podAnnotations: Record<string, string>;
+    /**
+     * The controller's allowlisted metadata, empty when it was not resolved.
+     *
+     * Kept **beside** the pod's rather than merged into it, so the two
+     * allowlists stay separately auditable and the merge — where the pod wins —
+     * happens in one place, {@link mergedMetadata}.
+     */
+    ownerLabels: Record<string, string>;
+    ownerAnnotations: Record<string, string>;
     imagePullSecrets: string[];
 }
 
@@ -257,29 +317,97 @@ export const RELEVANT_POD_LABEL_KEYS = new Set([
 ]);
 
 // Annotations we keep. These are deployment-tooling breadcrumbs that aren't
-// available as labels — chiefly Helm release context and ArgoCD app tracking.
+// available as labels — chiefly Helm release context.
+//
+// `argocd.argoproj.io/tracking-id` is deliberately *not* here. It was, from
+// phase 1 onwards, and it never once matched: ArgoCD annotates the objects it
+// applies and nothing propagates that to the pod template. It lives in the
+// owner allowlist below, where it is actually written.
 export const RELEVANT_POD_ANNOTATION_KEYS = new Set([
     "meta.helm.sh/release-name",
     "meta.helm.sh/release-namespace",
+]);
+
+// The same boundary, one object up: what the agent keeps off a pod's Deployment,
+// StatefulSet, DaemonSet, Job or CronJob.
+//
+// Spelled out rather than derived from the pod sets. Deriving them would make
+// widening one silently widen the other, and these are the sets README.md
+// promises customers — each has to be its own visible diff.
+export const RELEVANT_OWNER_LABEL_KEYS = new Set([
+    "app",
+    "version",
+    "app.kubernetes.io/name",
+    "app.kubernetes.io/version",
+    "app.kubernetes.io/component",
+    "app.kubernetes.io/part-of",
+    "app.kubernetes.io/instance",
+    "app.kubernetes.io/managed-by",
+    "helm.sh/chart",
+    "release",
+    "chart",
+    "heritage",
+]);
+
+export const RELEVANT_OWNER_ANNOTATION_KEYS = new Set([
+    // Where Helm actually writes these — on the object it applies, never on the
+    // pod template it renders inside it.
+    "meta.helm.sh/release-name",
+    "meta.helm.sh/release-namespace",
+    // `<app>:<group>/<Kind>:<namespace>/<name>`. The delivery layer, not the
+    // packaging one: see `applicationForWorkload`.
     "argocd.argoproj.io/tracking-id",
 ]);
+
+function pick(
+    source: Record<string, string> | undefined,
+    allowed: ReadonlySet<string>
+): Record<string, string> {
+    if (!source) return {};
+    return Object.fromEntries(Object.entries(source).filter(([k]) => allowed.has(k)));
+}
 
 export function pickPodLabels(
     podLabels: Record<string, string> | undefined
 ): Record<string, string> {
-    if (!podLabels) return {};
-    return Object.fromEntries(
-        Object.entries(podLabels).filter(([k]) => RELEVANT_POD_LABEL_KEYS.has(k))
-    );
+    return pick(podLabels, RELEVANT_POD_LABEL_KEYS);
 }
 
 export function pickPodAnnotations(
     podAnnotations: Record<string, string> | undefined
 ): Record<string, string> {
-    if (!podAnnotations) return {};
-    return Object.fromEntries(
-        Object.entries(podAnnotations).filter(([k]) => RELEVANT_POD_ANNOTATION_KEYS.has(k))
-    );
+    return pick(podAnnotations, RELEVANT_POD_ANNOTATION_KEYS);
+}
+
+export function pickOwnerLabels(
+    ownerLabels: Record<string, string> | undefined
+): Record<string, string> {
+    return pick(ownerLabels, RELEVANT_OWNER_LABEL_KEYS);
+}
+
+export function pickOwnerAnnotations(
+    ownerAnnotations: Record<string, string> | undefined
+): Record<string, string> {
+    return pick(ownerAnnotations, RELEVANT_OWNER_ANNOTATION_KEYS);
+}
+
+/**
+ * Everything known about where a workload came from, pod and controller merged.
+ *
+ * **The pod wins on conflict.** It is the more specific object and it is what
+ * the container actually runs under; the controller's copy is the fallback for
+ * the keys the pod template never received. Owner metadata is therefore only
+ * ever additive, which is what keeps this change incapable of *changing* an
+ * attribution that already worked.
+ */
+export function mergedMetadata(info: ImageInfo): {
+    labels: Record<string, string>;
+    annotations: Record<string, string>;
+} {
+    return {
+        labels: { ...info.ownerLabels, ...info.podLabels },
+        annotations: { ...info.ownerAnnotations, ...info.podAnnotations },
+    };
 }
 
 export function deriveWorkloadName(
@@ -476,7 +604,7 @@ export async function generateSBOM(pullRef: string, dockerConfigDir?: string): P
  * derived from exactly the same rule. Any drift between them would show up in
  * the UI as a "discovered" count that never finishes converging on "scanned".
  */
-export function podImages(pod: k8s.V1Pod): ImageInfo[] {
+export function podImages(pod: k8s.V1Pod, owners?: OwnerMetadataLookup): ImageInfo[] {
     const namespace = pod.metadata?.namespace ?? "default";
     if (!shouldScan(namespace)) return [];
 
@@ -494,6 +622,14 @@ export function podImages(pod: k8s.V1Pod): ImageInfo[] {
     const images: ImageInfo[] = [];
     const owner = resolveOwner(pod);
     const startedAt = pod.status?.startTime ? new Date(pod.status.startTime) : undefined;
+
+    /* Empty when owner resolution is off, denied, or simply has not run — the
+       scan hot path calls this with no lookup at all. Empty is the same shape
+       as "the controller carried nothing", and both mean pod-only attribution;
+       what separates them for the *report* is the warning `watch.ts` sends. */
+    const ownerMetadata = owner.kind
+        ? owners?.get(ownerKey(namespace, owner.kind, owner.name))
+        : undefined;
 
     for (const { cs, init } of allStatuses) {
         const isActive = cs.state?.running || cs.state?.terminated;
@@ -541,6 +677,8 @@ export function podImages(pod: k8s.V1Pod): ImageInfo[] {
             startedAt,
             podLabels: pickPodLabels(rawLabels),
             podAnnotations: pickPodAnnotations(pod.metadata?.annotations),
+            ownerLabels: ownerMetadata?.labels ?? {},
+            ownerAnnotations: ownerMetadata?.annotations ?? {},
             imagePullSecrets: pullSecrets,
         });
     }
@@ -551,13 +689,13 @@ export function podImages(pod: k8s.V1Pod): ImageInfo[] {
 // ─── Inventory ───────────────────────────────────────────────────────────────
 
 /**
- * The `POST /v1/inventory` v2 payload.
+ * The `POST /v1/inventory` v3 payload.
  *
- * Derived from `sbom-tracker/docs/contracts/inventory-v2.md`, which is the
+ * Derived from `sbom-tracker/docs/contracts/inventory-v3.md`, which is the
  * shared definition both repos encode. Change the contract first.
  */
 
-export const INVENTORY_VERSION = 2;
+export const INVENTORY_VERSION = 3;
 
 export interface InventoryContainer {
     name: string;
@@ -576,7 +714,18 @@ export interface InventoryWorkload {
     /** `null` when `ownerReferences` could not be resolved. */
     kind: string | null;
     name: string;
+    /** What **packaged** this — a Helm chart. Natural-key reference into `releases[]`. */
     release: { name: string; namespace: string } | null;
+    /**
+     * What **delivers** this — an ArgoCD or Flux app. Natural-key reference into
+     * `applications[]`.
+     *
+     * A second, independent reference rather than a value on the release,
+     * because a workload legitimately has both at different layers: ArgoCD
+     * commonly deploys *via* Helm, and the chart version is what a CVE report
+     * cites while the Argo app is where the fix is made.
+     */
+    application: { name: string; namespace: string } | null;
     runningPods: number;
     firstStartedAt: string | null;
     labels: Record<string, string> | null;
@@ -590,23 +739,74 @@ export interface InventoryNamespace {
     workloads: InventoryWorkload[];
 }
 
+/**
+ * A Helm release — the **packaging** layer.
+ *
+ * No `source` field. Every row here is a Helm release now that the delivery
+ * layer has its own relation, and a column whose only value is `"helm"` is a
+ * column that invites someone to write `"argocd"` into it later. Flux is not an
+ * exception: it installs *through* the Helm SDK, so a `HelmRelease` CR produces
+ * a genuine release here **and** an entry in `applications[]`.
+ */
 export interface InventoryRelease {
     name: string;
     /** The **release's** own namespace, from `meta.helm.sh/release-namespace`. */
     namespace: string;
     chartName: string | null;
     chartVersion: string | null;
+    /**
+     * From `app.kubernetes.io/version`. Kept distinct from `chartVersion` even
+     * when the two are byte-identical: plenty of charts stamp their own version
+     * into this label, so equality is not evidence they are the same thing and
+     * nothing downstream may derive one from the other.
+     */
     appVersion: string | null;
-    /** Always `null` today — pod metadata cannot supply it. See phase 3. */
+    /** `null` until an `Application` object supplies it — see phase C. */
     repoUrl: string | null;
-    source: "helm";
+}
+
+/** The tools that deliver a workload. Both may package *via* Helm. */
+export const GITOPS_TOOLS = ["argocd", "flux"] as const;
+export type GitopsTool = typeof GITOPS_TOOLS[number];
+
+/**
+ * A GitOps application — the **delivery** layer.
+ *
+ * Its own relation rather than a `source` value on the release, because the two
+ * answer different questions: "what chart packaged this, at what version" and
+ * "what delivers this, and where do I change it". On a cluster where ArgoCD
+ * renders Helm charts most workloads have both answers, and both are true.
+ */
+export interface InventoryApplication {
+    name: string;
+    /** The **application object's** own namespace, e.g. `argocd`. */
+    namespace: string;
+    tool: GitopsTool;
+    /** All four are `null` until the `Application` object is read — phase C. */
+    repoUrl: string | null;
+    targetRevision: string | null;
+    chart: string | null;
+    path: string | null;
+    destinationNamespace: string | null;
 }
 
 export interface InventoryReport {
     version: number;
     reportedAt: string;
     informerSynced: boolean;
+    /**
+     * Whether the controller metadata behind every attribution was readable.
+     *
+     * `false` means the agent could not `get` the pods' controllers — RBAC
+     * absent, or `scanner.resolveWorkloadOwners` switched off — so a workload
+     * reported without a release may still be chart-managed. Distinguishing
+     * "no chart claims this" from "we could not look" is the whole point: they
+     * render identically otherwise, which is what made this class of bug
+     * invisible for a release.
+     */
+    ownerMetadataCollected: boolean;
     releases: InventoryRelease[];
+    applications: InventoryApplication[];
     namespaces: InventoryNamespace[];
 }
 
@@ -635,42 +835,84 @@ export function parseHelmChartLabel(label: string | undefined): {
 }
 
 /**
- * The Helm release a pod belongs to.
+ * Whether an object's own metadata says "Helm made this", in Helm's pre-3.0
+ * spelling.
  *
- * **Read from labels, not from `meta.helm.sh/release-*`.** Helm writes those
- * annotations onto the objects it manages directly — the Deployment, the
- * StatefulSet — and nothing propagates them to the pod template, so on a real
- * cluster no pod carries them and an annotation-gated check finds zero releases
- * everywhere. Worse, a chart applied by ArgoCD or Flux has them on nothing at
- * all: the renderer is Helm but the installer is not, and only the labels
- * survive that hand-off.
+ * `release`, `chart` and `heritage` carry no prefix, and the label spec is
+ * explicit that "labels without a prefix are private to users" — `release:
+ * stable` as somebody's channel marker is a legitimate use of that key. So the
+ * unprefixed set is only read as Helm's when something else in the same object
+ * agrees: `heritage: Helm`, a prefixed `helm.sh/chart`, or a `chart` label that
+ * parses as `<name>-<version>` the way Helm writes it.
+ */
+function hasHelmSpelling(labels: Record<string, string>): boolean {
+    return (
+        (labels["heritage"] ?? "").toLowerCase() === "helm" ||
+        !!labels["helm.sh/chart"] ||
+        (!!labels["chart"] && parseHelmChartLabel(labels["chart"]).chartVersion !== null)
+    );
+}
+
+/**
+ * The Helm release a workload belongs to, from the pod **and its controller**.
  *
- * What does reach the pod is the standard label set every chart templates into
- * `spec.template.metadata.labels`: `app.kubernetes.io/instance` is the release
- * name and `helm.sh/chart` is `<chart>-<version>`. The annotations are still
- * honoured first where they do appear — a bare pod `helm install`ed on its own
- * has them, and they are the only source that can name a release living in a
- * *different* namespace than the workload.
+ * Three rules, each a correction of something the pod-only version got wrong on
+ * a real cluster.
+ *
+ * **The evidence spans both objects.** The pod is the one link in the chain that
+ * usually does *not* carry chart context: Helm writes `meta.helm.sh/release-*`
+ * onto the object it applies and never onto the pod template, and an operator
+ * that generates a StatefulSet from a CR writes its own label set for the pods,
+ * dropping `chart` / `heritage` / `release` on the way through. The spec's own
+ * advice — "they should be applied on every resource object" — assumes a reader
+ * that looks at the object it is asking about. {@link mergedMetadata} is that
+ * reader, with the pod winning any key both objects carry.
+ *
+ * **The evidence must be positive.** The previous rule vetoed on
+ * `app.kubernetes.io/managed-by`, but the spec defines that label as "the tool
+ * being used to manage the *operation* of an application" — so `managed-by:
+ * prometheus-operator` on a StatefulSet that Helm packaged is a true statement,
+ * not a contradiction, and it is the label that hid two whole releases. It is
+ * absent on three quarters of a typical fleet anyway, so a rule of the form
+ * "trust this only when managed-by says Helm" starts by discarding the
+ * majority. It stays here as one way to say Helm, never as a way to say
+ * not-Helm.
+ *
+ * **`instance` is the last source for a name.** The spec defines it as a unique
+ * *instance* name, not a release name — prometheus-operator correctly stamps
+ * `instance: kube-prometheus-stack-alertmanager` on one instance of the
+ * `kube-prometheus-stack` release, and reading it as a release would split one
+ * release into three. That is the failure the old veto existed to prevent, and
+ * the ordering below prevents it without the veto.
  */
 function releaseForPod(info: ImageInfo): InventoryRelease | null {
-    /* Authoritative when present, which is rare: Helm wrote it, so both the
-       name and the release's own namespace are facts rather than inferences. */
-    const annotatedName = info.podAnnotations["meta.helm.sh/release-name"];
-    const annotatedNamespace = info.podAnnotations["meta.helm.sh/release-namespace"];
+    const { labels, annotations } = mergedMetadata(info);
 
-    /* `app.kubernetes.io/managed-by` names the controller that owns the object.
-       When something other than Helm claims it, `instance` is that controller's
-       grouping key and not a release name — prometheus-operator stamps
-       `instance: kube-prometheus-stack-alertmanager` on pods of a StatefulSet
-       it generated itself, and trusting it would invent a release that no
-       `helm list` will ever show. */
-    const managedBy = info.podLabels["app.kubernetes.io/managed-by"] ?? info.podLabels["heritage"];
-    if (!annotatedName && managedBy && managedBy.toLowerCase() !== "helm") return null;
+    /* Authoritative when present: Helm wrote it, so both the name and the
+       release's own namespace are facts rather than inferences. Now actually
+       reachable — this is the annotation that lives on the controller. */
+    const annotatedName = annotations["meta.helm.sh/release-name"];
+    const annotatedNamespace = annotations["meta.helm.sh/release-namespace"];
 
+    const helmSpelling = hasHelmSpelling(labels);
+    const helmEvidence =
+        !!annotatedName ||
+        (labels["app.kubernetes.io/managed-by"] ?? "").toLowerCase() === "helm" ||
+        helmSpelling;
+    if (!helmEvidence) return null;
+
+    /* Prefixed spelling first — it is the one the spec governs. The unprefixed
+       `chart` is read only under the corroboration `helmSpelling` establishes. */
+    const chartLabel = labels["helm.sh/chart"] ?? (helmSpelling ? labels["chart"] : undefined);
+
+    /* `release` outranks `app.kubernetes.io/instance` — but only corroborated,
+       because unprefixed keys are user-private per the spec. Uncorroborated,
+       the spec label is the safer of the two. */
     const name =
         annotatedName ??
-        info.podLabels["app.kubernetes.io/instance"] ??
-        info.podLabels["release"];
+        (helmSpelling ? labels["release"] : undefined) ??
+        labels["app.kubernetes.io/instance"] ??
+        labels["release"];
     if (!name) return null;
 
     /* The *release's* namespace, not the workload's — a chart may deploy
@@ -680,21 +922,86 @@ function releaseForPod(info: ImageInfo): InventoryRelease | null {
        best answer, and it is right for every single-namespace release. */
     const namespace = annotatedNamespace ?? info.namespace;
 
-    const { chartName, chartVersion } = parseHelmChartLabel(
-        info.podLabels["helm.sh/chart"] ?? info.podLabels["chart"]
-    );
+    const { chartName, chartVersion } = parseHelmChartLabel(chartLabel);
 
     return {
         name,
         namespace,
         chartName,
         chartVersion,
-        appVersion: info.podLabels["app.kubernetes.io/version"] ?? null,
-        // Pod metadata cannot supply it, and `null` means unknown rather than
-        // "no repo". Without it, fleet-wide "all releases of chart X" is a name
-        // match — see phase 3.
+        /* The app's version per the spec, and charts get it wrong often enough
+           that it must never be the thing a fix is computed from — five of
+           fifteen releases on the reference cluster stamp the *chart* version
+           here. Collected, kept distinct from `chartVersion`, and never
+           derived from it. */
+        appVersion: labels["app.kubernetes.io/version"] ?? null,
+        // `null` means unknown rather than "no repo". Without it, fleet-wide
+        // "all releases of chart X" is a name match — see phase C.
         repoUrl: null,
-        source: "helm",
+    };
+}
+
+/**
+ * Split an ArgoCD tracking annotation into the `Application` it names.
+ *
+ * ```
+ * kube-prometheus-stack:apps/StatefulSet:monitoring/alertmanager-kps
+ * └── app                └── tracked GVK  └── tracked object
+ * ```
+ *
+ * Only the first field is of interest — the rest re-states the object we are
+ * already looking at. With apps-in-any-namespace switched on that field is
+ * `<namespace>/<app>`; bare otherwise, and then the app's namespace is not in
+ * the annotation at all and the caller supplies the configured one.
+ *
+ * The trailing fields are still required to be present: a bare string with no
+ * `:` in it is not a tracking ID, and treating it as an app name would invent a
+ * delivery layer out of an unrelated annotation value.
+ */
+export function parseArgocdTrackingId(
+    value: string | undefined
+): { name: string; namespace: string | null } | null {
+    if (!value) return null;
+    const separator = value.indexOf(":");
+    if (separator <= 0) return null;
+
+    const app = value.slice(0, separator);
+    if (!app) return null;
+
+    const slash = app.indexOf("/");
+    if (slash === -1) return { name: app, namespace: null };
+
+    const namespace = app.slice(0, slash);
+    const name = app.slice(slash + 1);
+    if (!namespace || !name) return null;
+    return { name, namespace };
+}
+
+/**
+ * The GitOps application delivering a workload.
+ *
+ * Phase B reads the tracking annotation alone, so everything but the name and
+ * namespace is `null` — `repoUrl`, `targetRevision`, `chart` and `path` come
+ * from the `Application` object in phase C, and {@link mergeApplication} folds
+ * them in when it is available.
+ */
+function applicationForWorkload(
+    info: ImageInfo,
+    argocdNamespace: string
+): InventoryApplication | null {
+    const { annotations } = mergedMetadata(info);
+    const tracked = parseArgocdTrackingId(annotations["argocd.argoproj.io/tracking-id"]);
+    if (!tracked) return null;
+
+    return {
+        name: tracked.name,
+        namespace: tracked.namespace ?? argocdNamespace,
+        tool: "argocd",
+        repoUrl: null,
+        targetRevision: null,
+        chart: null,
+        path: null,
+        destinationNamespace: null,
     };
 }
 
@@ -723,7 +1030,57 @@ export function mergeRelease(
     return existing;
 }
 
+/**
+ * Fold one workload's view of an application into what the others already said.
+ *
+ * Same shape as {@link mergeRelease}, simpler tie-break: every workload an app
+ * delivers reports the identical bare row derived from the tracking annotation,
+ * so the only interesting case is a row enriched from the `Application` object
+ * meeting a bare one. The enriched one wins whichever order they arrive in.
+ */
+export function mergeApplication(
+    existing: InventoryApplication | undefined,
+    incoming: InventoryApplication,
+): InventoryApplication {
+    if (!existing) return incoming;
+    if (existing.repoUrl) return existing;
+    if (incoming.repoUrl) return incoming;
+    return existing;
+}
+
 const releaseKey = (namespace: string, name: string) => `${namespace}\u0000${name}`;
+
+/** Same natural key as a release's, over the application's own namespace. */
+export const applicationKey = (namespace: string, name: string) =>
+    `${namespace}\u0000${name}`;
+
+/**
+ * Everything the report needs beyond the pods themselves.
+ *
+ * Both lookups are resolved once per publish, off the informer's hot path:
+ * controller metadata changes on deploy rather than on pod churn, and an
+ * `Application` object changes less often than that.
+ */
+export interface InventoryContext {
+    /** Controller metadata, keyed by {@link ownerKey}. See `owner-cache.ts`. */
+    owners?: OwnerMetadataLookup;
+    /**
+     * `false` when the controllers could not be read at all — RBAC absent, or
+     * the lookup switched off. Carried through so the control plane can tell
+     * "no chart claims this" from "we could not look"; the two are otherwise
+     * indistinguishable, which is what made this class of bug invisible.
+     */
+    ownerMetadataCollected?: boolean;
+    /**
+     * `Application` objects keyed by {@link applicationKey}, from phase C.
+     * Absent when the CRD is not installed or the lookup is off — the
+     * applications the tracking annotation names still reach the report, just
+     * without a repository URL.
+     */
+    applications?: ReadonlyMap<string, InventoryApplication>;
+    /** Where `Application` objects live when a tracking ID does not say. */
+    argocdNamespace?: string;
+}
 
 /**
  * Collapse the informer's pod cache into one inventory report.
@@ -737,9 +1094,19 @@ const releaseKey = (namespace: string, name: string) => `${namespace}\u0000${nam
  *   single row would hide the half of the fleet still on the old image. That
  *   state is exactly what "is the fix deployed?" reads, so the counts are per
  *   triple and do not have to sum to the workload's.
+ *
+ * The two attribution layers are folded in independently. A workload may carry
+ * a release, an application, both or neither — and "both" is the majority case
+ * on a cluster where ArgoCD renders Helm charts, so collapsing them into one
+ * field would make each such workload pick a lens and discard the other.
  */
-export function buildInventory(pods: readonly k8s.V1Pod[]): InventoryReport {
+export function buildInventory(
+    pods: readonly k8s.V1Pod[],
+    ctx: InventoryContext = {},
+): InventoryReport {
+    const argocdNamespace = ctx.argocdNamespace ?? ARGOCD_NAMESPACE;
     const releases = new Map<string, InventoryRelease>();
+    const applications = new Map<string, InventoryApplication>();
     const namespaces = new Map<string, InventoryNamespace>();
     // `namespace\0kind\0name` → workload, and the pod identities counted into it.
     const workloads = new Map<string, { workload: InventoryWorkload; pods: Set<string> }>();
@@ -747,7 +1114,7 @@ export function buildInventory(pods: readonly k8s.V1Pod[]): InventoryReport {
 
     for (const pod of pods) {
         const podId = `${pod.metadata?.namespace ?? ""}/${pod.metadata?.name ?? ""}`;
-        for (const info of podImages(pod)) {
+        for (const info of podImages(pod, ctx.owners)) {
             if (!info.digest) continue;
 
             let ns = namespaces.get(info.namespace);
@@ -765,6 +1132,24 @@ export function buildInventory(pods: readonly k8s.V1Pod[]): InventoryReport {
                 releases.set(key, mergeRelease(releases.get(key), release));
             }
 
+            /* The delivery layer, resolved independently of the release. The
+               tracking annotation gives the app's identity; the `Application`
+               object, where phase C could read one, gives the repository and
+               revision — which is where an Argo user actually makes a fix. */
+            const tracked = applicationForWorkload(info, argocdNamespace);
+            const application = tracked
+                ? ctx.applications?.get(applicationKey(tracked.namespace, tracked.name)) ?? tracked
+                : null;
+            if (application) {
+                const key = applicationKey(application.namespace, application.name);
+                applications.set(key, mergeApplication(applications.get(key), application));
+            }
+
+            /* The merged set, so `app.kubernetes.io/part-of` and the chart
+               labels reach the UI even when only the controller carried them.
+               Not new collection — both allowlists have already been applied. */
+            const { labels } = mergedMetadata(info);
+
             const wKey = `${info.namespace}\u0000${info.workloadKind ?? ""}\u0000${info.workloadName}`;
             let entry = workloads.get(wKey);
             if (!entry) {
@@ -772,9 +1157,12 @@ export function buildInventory(pods: readonly k8s.V1Pod[]): InventoryReport {
                     kind: info.workloadKind,
                     name: info.workloadName,
                     release: release ? { name: release.name, namespace: release.namespace } : null,
+                    application: application
+                        ? { name: application.name, namespace: application.namespace }
+                        : null,
                     runningPods: 0,
                     firstStartedAt: info.startedAt?.toISOString() ?? null,
-                    labels: Object.keys(info.podLabels).length > 0 ? info.podLabels : null,
+                    labels: Object.keys(labels).length > 0 ? labels : null,
                     containers: [],
                 };
                 entry = { workload, pods: new Set() };
@@ -823,7 +1211,13 @@ export function buildInventory(pods: readonly k8s.V1Pod[]): InventoryReport {
         // Overridden by the caller when the informer has not finished its
         // initial sync; see `watch.ts`.
         informerSynced: true,
+        /* `true` unless the caller says otherwise, so a producer that never
+           looks — a unit test, a build over a static pod list — does not claim
+           a permissions failure it did not have. `watch.ts` passes the real
+           answer. */
+        ownerMetadataCollected: ctx.ownerMetadataCollected ?? true,
         releases: [...releases.values()],
+        applications: [...applications.values()],
         namespaces: [...namespaces.values()],
     };
 }
