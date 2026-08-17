@@ -18,6 +18,18 @@ Removed, Fixed, Security — so use those six and nothing else.
 
 ## [Unreleased]
 
+### Added
+
+- **The agent reports the cluster's Kubernetes version on its heartbeat.**
+  Charts declare the Kubernetes range they support (`kubeVersion`), and
+  StackRadar can now warn when a suggested chart upgrade requires a newer
+  Kubernetes than the cluster runs — but only if it knows the cluster's
+  version. The agent reads `/version` (part of the discovery API every
+  authenticated principal can already reach — no RBAC change) at startup and
+  on the heartbeat cadence, and sends the `gitVersion` string, e.g.
+  `v1.29.4+k3s1`, in an `X-Kubernetes-Version` header. If the read fails the
+  header is simply absent; the server never treats absence as a value.
+
 ## [0.1.7] - 2026-08-17
 
 ### Added

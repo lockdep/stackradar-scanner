@@ -172,6 +172,10 @@ Sent to your StackRadar API endpoint, per image:
 - **The repository URL, chart, path and target revision** of an ArgoCD
   `Application`, where one exists. Not its manifests, and not its sync status.
 - Your cluster ID, and the agent version in an `X-Scanner-Version` header.
+- **The cluster's Kubernetes version** (`gitVersion` from `/version`, e.g.
+  `v1.29.4+k3s1`), in an `X-Kubernetes-Version` header on the heartbeat. Used
+  to warn when a suggested chart upgrade's `kubeVersion` constraint excludes
+  your cluster. If the read fails, the header is not sent.
 
 The four allowlists are literal `Set`s in
 [`src/lib/scan.ts`](src/lib/scan.ts) (`RELEVANT_POD_LABEL_KEYS`,

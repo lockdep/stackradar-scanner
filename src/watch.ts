@@ -28,6 +28,7 @@ import {
 import { OwnerMetadataCache } from "./lib/owner-cache.js";
 import { ArgocdApplicationCache } from "./lib/argocd-applications.js";
 import { heartbeat, checkExistingSbom, uploadSBOM, reportInventory } from "./lib/client.js";
+import { refreshClusterVersion } from "./lib/cluster-version.js";
 import { configureProxy } from "./lib/proxy.js";
 import {
     HEALTH_PORT,
@@ -276,6 +277,9 @@ async function main(): Promise<void> {
         ? new ArgocdApplicationCache(kc, ARGOCD_NAMESPACE)
         : null;
 
+    // Before the first heartbeat, so it can carry the version; a failed read
+    // logs and the heartbeat goes out without the header.
+    await refreshClusterVersion(kc);
     await heartbeat();
 
     const informer = k8s.makeInformer(
@@ -320,9 +324,13 @@ async function main(): Promise<void> {
     await publishInventory(informer.list(), owners, argocd);
 
     setInterval(() => {
-        heartbeat().catch((err) =>
-            log.warn({ err: err instanceof Error ? err.message : String(err) }, "heartbeat failed")
-        );
+        // Refresh first — control planes upgrade underneath long-lived
+        // agents — then let the heartbeat carry whatever is last known.
+        refreshClusterVersion(kc)
+            .then(() => heartbeat())
+            .catch((err) =>
+                log.warn({ err: err instanceof Error ? err.message : String(err) }, "heartbeat failed")
+            );
         // Same cadence, because the report is a full set replacement and this
         // is how a scaled-down or deleted workload leaves the inventory.
         void publishInventory(informer.list(), owners, argocd);

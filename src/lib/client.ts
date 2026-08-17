@@ -2,6 +2,7 @@ import * as fs from "fs";
 import { API_URL, API_KEY, SCANNER_VERSION, CLUSTER_ID, type InventoryReport } from "./scan.js";
 import { log } from "./logger.js";
 import { recordHeartbeatOk, recordHeartbeatFailure } from "./health.js";
+import { clusterVersion } from "./cluster-version.js";
 
 // ─── HTTP with retry ─────────────────────────────────────────────────────────
 
@@ -79,6 +80,11 @@ export async function heartbeat(): Promise<void> {
     const url = `${API_URL}/v1/heartbeat`;
     const headers: Record<string, string> = { "X-API-Key": API_KEY! };
     if (CLUSTER_ID) headers["X-Cluster-Id"] = CLUSTER_ID;
+    // On the heartbeat only, not injected into every request: the server
+    // records it from this endpoint, and a version we never managed to read
+    // sends nothing rather than a guess.
+    const kubeVersion = clusterVersion();
+    if (kubeVersion) headers["X-Kubernetes-Version"] = kubeVersion;
 
     let response: Response;
     try {
