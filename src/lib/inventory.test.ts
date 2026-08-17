@@ -812,6 +812,102 @@ describe("buildInventory", () => {
                 chart: "kube-prometheus-stack",
             });
         });
+
+        /*
+         * The delivery↔packaging join — fix-tab-suggestions.md phase 2. The
+         * Application's chart source is the only object in the cluster that
+         * knows a release's chart repository, and joining it is what upgrades
+         * fleet-wide chart matching from a name guess to a repo-url fact.
+         */
+        describe("the delivery↔packaging join", () => {
+            const application = (overrides: Partial<{
+                repoUrl: string | null;
+                chart: string | null;
+                path: string | null;
+            }> = {}) =>
+                new Map([[
+                    "argocd\u0000kube-prometheus-stack",
+                    {
+                        name: "kube-prometheus-stack",
+                        namespace: "argocd",
+                        tool: "argocd" as const,
+                        repoUrl: "https://prometheus-community.github.io/helm-charts",
+                        targetRevision: "82.18.0",
+                        chart: "kube-prometheus-stack",
+                        path: null,
+                        destinationNamespace: "monitoring",
+                        ...overrides,
+                    },
+                ]]);
+
+            const build = (applications: ReturnType<typeof application>, podOverride?: k8s.V1Pod) =>
+                buildInventory(
+                    [podOverride ?? trackedPod("kps-operator-1", "kps-operator")],
+                    {
+                        owners: trackingOwners(
+                            "kps-operator",
+                            "kube-prometheus-stack:apps/Deployment:monitoring/kps-operator"
+                        ),
+                        applications,
+                    },
+                );
+
+            it("fills the release's repoUrl from a chart-source application", () => {
+                const report = build(application());
+                expect(report.releases[0]).toMatchObject({
+                    name: "kube-prometheus-stack",
+                    chartName: "kube-prometheus-stack",
+                    repoUrl: "https://prometheus-community.github.io/helm-charts",
+                });
+            });
+
+            /* A path-source app's repoURL is a *git* repository. Recording it
+               as the chart's origin would make chart matching assert something
+               false about where the chart is published. */
+            it("does not join a path-source application", () => {
+                const report = build(
+                    application({ chart: null, path: "charts/kps", repoUrl: "https://github.com/acme/deploy.git" })
+                );
+                expect(report.releases[0]!.repoUrl).toBeNull();
+            });
+
+            /* Pods of an umbrella release can label themselves with a subchart;
+               `subchart@<umbrella's repo>` is not a fact we may state. */
+            it("does not join when the chart names disagree", () => {
+                const subchartPod = pod({
+                    name: "kps-grafana-1",
+                    namespace: "monitoring",
+                    ownerReferences: [{ kind: "Deployment", name: "kps-operator", controller: true }],
+                    labels: {
+                        "app.kubernetes.io/instance": "kube-prometheus-stack",
+                        "helm.sh/chart": "grafana-11.3.7",
+                    },
+                });
+                const report = build(application(), subchartPod);
+                expect(report.releases[0]!.chartName).toBe("grafana");
+                expect(report.releases[0]!.repoUrl).toBeNull();
+            });
+
+            /* A release that never learned its chart name cannot contradict
+               the app's claim, and downstream matching needs the name anyway —
+               carrying the URL loses nothing and preserves the observation. */
+            it("joins when the release has no chart name of its own", () => {
+                const namelessPod = pod({
+                    name: "kps-operator-1",
+                    namespace: "monitoring",
+                    ownerReferences: [{ kind: "Deployment", name: "kps-operator", controller: true }],
+                    labels: {
+                        "app.kubernetes.io/instance": "kube-prometheus-stack",
+                        "app.kubernetes.io/managed-by": "Helm",
+                    },
+                });
+                const report = build(application(), namelessPod);
+                expect(report.releases[0]!.chartName).toBeNull();
+                expect(report.releases[0]!.repoUrl).toBe(
+                    "https://prometheus-community.github.io/helm-charts"
+                );
+            });
+        });
     });
 
     it("excludes namespaces the scanner is configured to skip", () => {

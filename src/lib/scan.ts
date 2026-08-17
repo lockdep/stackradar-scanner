@@ -935,8 +935,9 @@ function releaseForPod(info: ImageInfo): InventoryRelease | null {
            here. Collected, kept distinct from `chartVersion`, and never
            derived from it. */
         appVersion: labels["app.kubernetes.io/version"] ?? null,
-        // `null` means unknown rather than "no repo". Without it, fleet-wide
-        // "all releases of chart X" is a name match — see phase C.
+        // `null` means unknown rather than "no repo". Pod metadata cannot
+        // supply it; `buildInventory` fills it in where a chart-source
+        // Application delivers this release (the delivery↔packaging join).
         repoUrl: null,
     };
 }
@@ -1111,6 +1112,8 @@ export function buildInventory(
     // `namespace\0kind\0name` → workload, and the pod identities counted into it.
     const workloads = new Map<string, { workload: InventoryWorkload; pods: Set<string> }>();
     const containers = new Map<string, InventoryContainer>();
+    // Release ↔ delivering application pairs, joined after the merge settles.
+    const releaseApplications = new Map<string, InventoryApplication[]>();
 
     for (const pod of pods) {
         const podId = `${pod.metadata?.namespace ?? ""}/${pod.metadata?.name ?? ""}`;
@@ -1143,6 +1146,16 @@ export function buildInventory(
             if (application) {
                 const key = applicationKey(application.namespace, application.name);
                 applications.set(key, mergeApplication(applications.get(key), application));
+            }
+
+            /* A workload carrying both layers is the evidence that this app
+               delivers this release — recorded now, joined after the loop
+               once `mergeRelease` has settled which chart names the release. */
+            if (release && application) {
+                const key = releaseKey(release.namespace, release.name);
+                const list = releaseApplications.get(key);
+                if (list) list.push(application);
+                else releaseApplications.set(key, [application]);
             }
 
             /* The merged set, so `app.kubernetes.io/part-of` and the chart
@@ -1201,6 +1214,30 @@ export function buildInventory(
 
     for (const { workload, pods: seen } of workloads.values()) {
         workload.runningPods = seen.size;
+    }
+
+    /* Join delivery to packaging — fix-tab-suggestions.md phase 2. The Argo
+       `Application`'s chart source is the one object in the cluster that
+       knows a release's chart *repository*, and without the join every
+       release ships `repoUrl: null` while the same report carries the URL on
+       the application. The join is deliberately narrow:
+
+       - only a chart-source app (`chart` set): a path-source app's `repoURL`
+         is a *git* repository, and recording it as the chart's origin would
+         make fleet-wide chart matching assert something false;
+       - only when the chart names agree (or the release never learned its
+         chart name): pods of an umbrella release can label themselves with a
+         subchart, and `subchart@<umbrella's repo>` is not a fact. */
+    for (const [key, candidates] of releaseApplications) {
+        const release = releases.get(key);
+        if (!release || release.repoUrl) continue;
+        const source = candidates.find(
+            (app) =>
+                app.repoUrl != null &&
+                app.chart != null &&
+                (release.chartName == null || app.chart === release.chartName),
+        );
+        if (source) release.repoUrl = source.repoUrl;
     }
 
     return {
