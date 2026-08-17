@@ -18,6 +18,34 @@ Removed, Fixed, Security — so use those six and nothing else.
 
 ## [Unreleased]
 
+### Added
+
+- **A Helm release now reports its chart repository when ArgoCD names it.**
+  No object Helm leaves on a workload says where its chart was published, so
+  every release's repository URL has been `NULL` since releases were first
+  reported — and "every release of chart X across your fleet" was a match on
+  the chart's *name*, which several repositories legitimately share. The
+  agent now joins the two layers it already collects: when a chart-source
+  ArgoCD `Application` delivers a release, the application's `repoURL` is
+  reported as the release's chart repository. In StackRadar that upgrades
+  chart matching from a labelled guess to a fact, which is what its upgrade
+  suggestions ("a newer version of this chart exists") are allowed to build
+  on.
+
+  The join is deliberately narrow, because a wrong repository is worse than
+  none. Only an `Application` whose source is a *chart* qualifies — a
+  git-path source's `repoURL` is a git repository, not where the chart is
+  published, so those releases honestly keep `NULL`. And the application's
+  chart name must agree with the release's own (or the release must never
+  have learned one): pods of an umbrella release sometimes label themselves
+  with a subchart, and reporting the subchart at the umbrella's repository
+  would be a false statement about where it lives.
+
+  Nothing to configure and no new RBAC: it reads the same `Application`
+  objects 0.1.6 already collects, and inherits their
+  `--set scanner.resolveArgocdApplications=false` off switch. Flux's
+  `HelmRepository` is the natural second source and is not read yet.
+
 ## [0.1.6] - 2026-08-16
 
 ### Fixed
@@ -85,32 +113,6 @@ Removed, Fixed, Security — so use those six and nothing else.
   (`scanner.argocdNamespace`, default `argocd`). A cluster with no ArgoCD
   answers 404 once and is never asked again. `--set
   scanner.resolveArgocdApplications=false` removes the rule.
-
-- **A Helm release now reports its chart repository when ArgoCD names it.**
-  No object Helm leaves on a workload says where its chart was published, so
-  every release's repository URL has been `NULL` since releases were first
-  reported — and "every release of chart X across your fleet" was a match on
-  the chart's *name*, which several repositories legitimately share. The
-  agent now joins the two layers it already collects: when a chart-source
-  ArgoCD `Application` delivers a release, the application's `repoURL` is
-  reported as the release's chart repository. In StackRadar that upgrades
-  chart matching from a labelled guess to a fact, which is what its upgrade
-  suggestions ("a newer version of this chart exists") are allowed to build
-  on.
-
-  The join is deliberately narrow, because a wrong repository is worse than
-  none. Only an `Application` whose source is a *chart* qualifies — a
-  git-path source's `repoURL` is a git repository, not where the chart is
-  published, so those releases honestly keep `NULL`. And the application's
-  chart name must agree with the release's own (or the release must never
-  have learned one): pods of an umbrella release sometimes label themselves
-  with a subchart, and reporting the subchart at the umbrella's repository
-  would be a false statement about where it lives.
-
-  Nothing to configure and no new RBAC: it reads the same `Application`
-  objects as the entry above, and inherits its
-  `--set scanner.resolveArgocdApplications=false` off switch. Flux's
-  `HelmRepository` is the natural second source and is not read yet.
 
 - **The unmanaged group is sub-grouped by `app.kubernetes.io/part-of`.** The
   workloads that genuinely have no chart and no app — ArgoCD's own components,
