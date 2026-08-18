@@ -5,7 +5,7 @@ import * as os from "os";
 import * as path from "path";
 import { promisify } from "util";
 import { log } from "./logger.js";
-import { parseImageRef } from "../parse-image-ref.js";
+import { isBareImageId, parseImageRef } from "../parse-image-ref.js";
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 
@@ -665,7 +665,12 @@ export function podImages(pod: k8s.V1Pod, owners?: OwnerMetadataLookup): ImageIn
 
         images.push({
             pullRef,
-            displayName: cs.image ?? pullRef,
+            /* `cs.image` is a bare image ID (`sha256:…`) when a digest-pinned
+               pod gives the runtime no tag to report. The pull ref still
+               carries the registry and repository from `imageID`, so it is
+               the better name in that case — the bare ID would parse its own
+               hex into a 64-character "tag". */
+            displayName: cs.image && !isBareImageId(cs.image) ? cs.image : pullRef,
             digest,
             namespace,
             // The owner's real name, not a regex guess at what the pod-name

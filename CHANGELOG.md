@@ -32,6 +32,22 @@ Removed, Fixed, Security — so use those six and nothing else.
   `v1.29.4+k3s1`, in an `X-Kubernetes-Version` header. If the read fails the
   header is simply absent; the server never treats absence as a value.
 
+### Fixed
+
+- **Digest-pinned workloads no longer appear as an image called `sha256` with a
+  64-character "tag".** When a pod pins its image by digest, the runtime has no
+  tag to report, and containerd fills the container status's `image` field with
+  a bare image ID — `sha256:` followed by 64 hex characters, no name at all.
+  The agent reported that string as the image's display name, and splitting it
+  on the colon filed the workload under a project named `sha256` with the hex
+  as its tag: unreadable in the workloads table, and useless for chart and
+  upgrade matching, since every digest-pinned image across the fleet collapsed
+  into the same fake `sha256` project. The agent now recognises the bare-ID
+  form and names such images by their pull reference instead, which comes from
+  the status's `imageID` and still carries the real registry and repository.
+  Actual references are unaffected — a repository genuinely named `sha256`
+  with a normal tag still parses as one.
+
 ## [0.1.7] - 2026-08-17
 
 ### Added

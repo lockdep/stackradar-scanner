@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseImageRef } from "./parse-image-ref.js";
+import { isBareImageId, parseImageRef } from "./parse-image-ref.js";
 
 describe("parseImageRef", () => {
     describe("project name extraction", () => {
@@ -113,6 +113,41 @@ describe("parseImageRef", () => {
 
         it("should return undefined for path without registry hostname", () => {
             expect(parseImageRef("myteam/myapp:v1").registry).toBeUndefined();
+        });
+    });
+
+    // containerd reports `containerStatus.image` as a bare image ID
+    // (`sha256:` + 64 hex — the config hash, not even the registry digest)
+    // when a digest-pinned pod gives it no tag. Splitting that on the colon
+    // is what put 64-character "tags" in the workloads table.
+    describe("bare image IDs", () => {
+        const hex = "a4a8af0db08902e65347157c5efef6d1f9e261f03c8aa14b1b40bc182b947fe7";
+
+        it("should parse a bare image ID to nothing", () => {
+            expect(parseImageRef(`sha256:${hex}`)).toEqual({
+                projectName: "",
+                tag: undefined,
+                registry: undefined,
+            });
+        });
+
+        it("should parse a bare image ID with an appended digest to nothing", () => {
+            expect(parseImageRef(`sha256:${hex}@sha256:${hex}`)).toEqual({
+                projectName: "",
+                tag: undefined,
+                registry: undefined,
+            });
+        });
+
+        it("should not treat a short sha256-prefixed ref as a bare ID", () => {
+            // A repository actually named `sha256` with a tag stays a ref.
+            expect(parseImageRef("sha256:v1").tag).toBe("v1");
+        });
+
+        it("isBareImageId matches only the full 64-hex form", () => {
+            expect(isBareImageId(`sha256:${hex}`)).toBe(true);
+            expect(isBareImageId("sha256:abc123")).toBe(false);
+            expect(isBareImageId(`nginx@sha256:${hex}`)).toBe(false);
         });
     });
 });
