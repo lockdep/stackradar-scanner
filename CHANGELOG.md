@@ -18,6 +18,8 @@ Removed, Fixed, Security — so use those six and nothing else.
 
 ## [Unreleased]
 
+## [0.1.9] - 2026-08-18
+
 ### Fixed
 
 - **Digest-pinned workloads no longer appear as an image called `sha256` with a
@@ -542,7 +544,8 @@ and can read this as the starting point.
 - The pod runs non-root (uid 65534) with a read-only root filesystem, all Linux
   capabilities dropped and no privilege escalation.
 
-[Unreleased]: https://github.com/lockdep/stackradar-scanner/compare/v0.1.8...HEAD
+[Unreleased]: https://github.com/lockdep/stackradar-scanner/compare/v0.1.9...HEAD
+[0.1.9]: https://github.com/lockdep/stackradar-scanner/compare/v0.1.8...v0.1.9
 [0.1.8]: https://github.com/lockdep/stackradar-scanner/compare/v0.1.7...v0.1.8
 [0.1.7]: https://github.com/lockdep/stackradar-scanner/compare/v0.1.6...v0.1.7
 [0.1.6]: https://github.com/lockdep/stackradar-scanner/compare/v0.1.5...v0.1.6
