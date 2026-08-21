@@ -202,6 +202,24 @@ The dogfood cluster tracks released chart versions. After a release, bump
 `targetRevision` in the gitops repo's `argocd/applications/apps/scanner.yaml`
 by hand and let ArgoCD sync it.
 
+## What the docs advertise
+
+The app's "Install the chart" dialog and the landing page's quick-start both
+render `--version <SCANNER_CHART_VERSION>` from a ConfigMap, so the install
+command users copy is always pinned to a real release. The `advertise` job at
+the end of `release.yaml` keeps that in step: after a stable release it
+rewrites `SCANNER_CHART_VERSION` in `apps/stack-radar/base/kustomization.yaml`
+and `apps/landing-page/base/kustomization.yaml` of both gitops repos — pushed
+straight to `lockdep/stackradar-gitops-development`, opened as a PR against
+`lockdep/stackradar-gitops`. Merging that PR is the last step of a release;
+until then production still advertises the previous version.
+
+Prereleases are never advertised. A rollback is the manual edit the comments
+in those files describe, not a re-run of this job.
+
+The job needs `GITOPS_TOKEN` and `GITOPS_PROD_TOKEN` as repository secrets —
+the same fine-grained PATs `lockdep/stackradar` uses for image pins.
+
 ## Upgrading a deployed scanner
 
 The version the chart reports flows through to the control plane: the

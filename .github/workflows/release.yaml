@@ -6,6 +6,10 @@ name: Release
 # the repository needs to be version-bumped by hand — see RELEASING.md.
 #
 # Tags are normally created by the Cut release workflow rather than by hand.
+#
+# Once published, the version is advertised to users: the `advertise` job bumps
+# SCANNER_CHART_VERSION in both gitops repos so the app's install dialog and
+# the docs pin the new release (pushed to development, PR'd to production).
 
 on:
   push:
@@ -446,3 +450,140 @@ jobs:
           fi
 
           gh release create "${GITHUB_REF_NAME}" "${args[@]}" "${PACKAGE}"
+
+  # The app's "Install the chart" dialog and the landing page's quick-start
+  # both render `--version <SCANNER_CHART_VERSION>` from their ConfigMaps, so
+  # a release is not finished until the gitops repos advertise it. This job
+  # rewrites that one key in both repos: a direct push to development (the
+  # same convention build-push-app uses for image pins) and a PR to production,
+  # so what the public docs advertise still goes through a review.
+  #
+  # Prereleases are skipped on purpose: a candidate must never become the
+  # version the docs tell a new user to install.
+  #
+  # Required secrets (the same PATs lockdep/stackradar uses):
+  #   GITOPS_TOKEN       - contents:write on lockdep/stackradar-gitops-development
+  #   GITOPS_PROD_TOKEN  - contents:write and pull-requests:write on
+  #                        lockdep/stackradar-gitops
+  advertise:
+    name: Advertise ${{ github.ref_name }} in gitops
+    needs: release
+    if: ${{ !contains(github.ref_name, '-') }}
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ github.ref_name }}
+      # Both files carry the same key; the app and the docs must agree on the
+      # version they pin.
+      FILES: apps/stack-radar/base/kustomization.yaml apps/landing-page/base/kustomization.yaml
+
+    steps:
+      - name: Checkout development gitops
+        uses: actions/checkout@v6
+        with:
+          repository: lockdep/stackradar-gitops-development
+          token: ${{ secrets.GITOPS_TOKEN }}
+          path: gitops-development
+
+      - name: Checkout production gitops
+        uses: actions/checkout@v6
+        with:
+          repository: lockdep/stackradar-gitops
+          token: ${{ secrets.GITOPS_PROD_TOKEN }}
+          path: gitops-production
+
+      - name: Configure git identity
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      # One exact-line rewrite per file, checked afterwards: a silently
+      # unmatched pattern would "succeed" while leaving the docs on the old
+      # version, which is the failure this job exists to prevent.
+      - name: Bump SCANNER_CHART_VERSION in both repos
+        run: |
+          set -euo pipefail
+          version="${VERSION#v}"
+          for repo in gitops-development gitops-production; do
+            read -ra files <<< "${FILES}"
+            for file in "${files[@]}"; do
+              path="${repo}/${file}"
+              sed -i -E "s/^([[:space:]]*- SCANNER_CHART_VERSION=).*$/\1${version}/" "${path}"
+              got="$(sed -nE 's/^[[:space:]]*- SCANNER_CHART_VERSION=(.*)$/\1/p' "${path}")"
+              if [ "${got}" != "${version}" ]; then
+                echo "::error::${path}: expected exactly one SCANNER_CHART_VERSION line set to ${version}, read back '${got}'."
+                exit 1
+              fi
+              echo "${path}: SCANNER_CHART_VERSION=${version}"
+            done
+          done
+
+      - name: Render the overlays to prove they still build
+        run: |
+          set -euo pipefail
+          for overlay in \
+            gitops-development/apps/stack-radar/overlays/development \
+            gitops-development/apps/landing-page/overlays/production \
+            gitops-production/apps/stack-radar/overlays/production \
+            gitops-production/apps/landing-page/overlays/production; do
+            kubectl kustomize "${overlay}" > /dev/null
+            echo "${overlay}: ok"
+          done
+
+      - name: Push to development
+        working-directory: gitops-development
+        run: |
+          set -euo pipefail
+          version="${VERSION#v}"
+          read -ra files <<< "${FILES}"
+          git add -- "${files[@]}"
+          if git diff --staged --quiet; then
+            echo "Development already advertises ${version}; nothing to push."
+            exit 0
+          fi
+          git commit -m "scanner: advertise chart ${version}"
+          git push
+
+      - name: Open production PR
+        working-directory: gitops-production
+        env:
+          GH_TOKEN: ${{ secrets.GITOPS_PROD_TOKEN }}
+        run: |
+          set -euo pipefail
+          version="${VERSION#v}"
+          branch="scanner-chart/${version}"
+
+          read -ra files <<< "${FILES}"
+          git add -- "${files[@]}"
+          if git diff --staged --quiet; then
+            echo "Production already advertises ${version}; nothing to propose."
+            exit 0
+          fi
+
+          # A re-run of this release (the tag is immutable, so the version is
+          # too) must not fail on its own earlier branch: replace it and reuse
+          # the PR if one is still open.
+          git checkout -b "${branch}"
+          git commit -m "scanner: advertise chart ${version}"
+          git push --force origin "${branch}"
+
+          existing="$(gh pr list --repo lockdep/stackradar-gitops --head "${branch}" --state open --json number --jq '.[0].number // ""')"
+          if [ -n "${existing}" ]; then
+            echo "PR #${existing} already open for ${branch}; branch updated."
+            exit 0
+          fi
+
+          gh pr create \
+            --repo lockdep/stackradar-gitops \
+            --base main \
+            --head "${branch}" \
+            --title "Advertise scanner chart ${version}" \
+            --body "$(cat <<EOF
+          Points the app's \"Install the chart\" command and the landing page quick-start
+          at the scanner chart just released as
+          [${VERSION}](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/tag/${VERSION}).
+
+          Changes \`SCANNER_CHART_VERSION\` in both ConfigMaps; the hashed names roll the
+          client and landing-page pods. Development was updated directly by the same
+          [release run](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}).
+          EOF
+          )"
