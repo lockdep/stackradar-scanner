@@ -111,14 +111,16 @@ Three properties of the grant are worth knowing:
 --set scanner.resolveWorkloadOwners=false --set scanner.resolveArgocdApplications=false
 ```
 
-### Narrowing `secrets get`
+### Reading pull Secrets — opt-in, and only by name
 
-By default the `secrets get` grant is cluster-wide. The agent uses far less than
-that — it reads only the Secrets named in a workload's `imagePullSecrets`, and
-uses them to build a temporary Docker config for syft — so name your pull
-secrets and the grant shrinks to exactly those, via RBAC `resourceNames`:
+The agent can reuse the Secrets named in a workload's `imagePullSecrets` to
+build a temporary Docker config for syft. That needs `secrets get` in the
+ClusterRole, and the chart never grants it cluster-wide: the feature is off by
+default, and turning it on requires naming the Secrets, which becomes an RBAC
+`resourceNames` restriction. An empty list with the feature on fails the render.
 
 ```bash
+--set scanner.resolveImagePullSecrets=true \
 --set 'scanner.imagePullSecretNames={regcred,ghcr-creds}'
 ```
 
@@ -129,9 +131,8 @@ secrets and the grant shrinks to exactly those, via RBAC `resourceNames`:
   resourceNames: ["regcred", "ghcr-creds"]
 ```
 
-This is the recommended setting, and it is safe to narrow because the agent only
-ever `get`s a Secret by name — it never lists or watches them. Two things to
-know before you set it:
+It is safe to narrow because the agent only ever `get`s a Secret by name — it
+never lists or watches them. Two things to know before you set it:
 
 - **It is a name match, not a namespace match.** `resourceNames` in a
   ClusterRole has no namespace to scope to, so a Secret called `regcred` is
@@ -142,12 +143,8 @@ know before you set it:
   namespace, and carries on with the rest of the scan.
 
 If you pull only from public registries, or you mount one static pull secret via
-`dockerConfigSecret`, turn resolution off entirely and the rule disappears from
-the ClusterRole:
-
-```bash
---set scanner.resolveImagePullSecrets=false
-```
+`dockerConfigSecret`, leave resolution off (the default) and no `secrets` rule
+is rendered at all.
 
 ### What leaves your cluster
 
@@ -234,14 +231,14 @@ pod watch established, when did the last heartbeat succeed) rather than
 anything about your workloads. If you run default-deny NetworkPolicies, allow
 the kubelet in on that port or the probes fail and the pod restarts in a loop.
 
-`networkPolicy.enabled=true` writes that policy for you: ingress limited to the
-health port, egress to DNS, the Kubernetes API server and TCP 443 — the list
-above, as an object you can read back with `kubectl get networkpolicy` instead
-of taking this section's word for it. It is off by default, because a registry
-outside the default rules stops being scanned and that is the silent failure
-this agent works hardest to avoid; the rules are yours to narrow via
-`networkPolicy.egress`. Note that a CNI which does not enforce NetworkPolicy
-ignores the object entirely. See
+The chart writes that policy for you by default (`networkPolicy.enabled`):
+ingress limited to the health port, egress to DNS, the Kubernetes API server
+and TCP 443 — the list above, as an object you can read back with
+`kubectl get networkpolicy` instead of taking this section's word for it. The
+failure to watch for is a registry outside those rules — on a port other than
+443, say — whose images stop being scanned; add a rule via
+`networkPolicy.egress`, or set `networkPolicy.enabled=false`. Note that a CNI
+which does not enforce NetworkPolicy ignores the object entirely. See
 [Restricting the agent's network](helm/README.md#restricting-the-agents-network).
 
 Where that egress goes through a corporate proxy, set `proxy.httpsProxy` (see

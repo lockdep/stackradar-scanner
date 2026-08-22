@@ -47,9 +47,12 @@ scanner:
   skipExistingDigests: "true"
 
   # -- Resolve imagePullSecrets from workload pod specs for private registry auth.
-  # Requires `secrets get` permission in the ClusterRole, which
-  # `scanner.imagePullSecretNames` narrows to a named set of Secrets.
-  resolveImagePullSecrets: "true"
+  # Off by default: it needs `secrets get` in the ClusterRole, and the chart
+  # refuses to grant that cluster-wide — turning this on also requires naming
+  # the pull Secrets in `scanner.imagePullSecretNames`, which becomes an RBAC
+  # `resourceNames` restriction. Leave it off if your images are public, or if
+  # you mount one static pull secret via `dockerConfigSecret`.
+  resolveImagePullSecrets: "false"
 
   # -- Read the metadata of the object each pod belongs to — its Deployment,
   # StatefulSet, DaemonSet, Job or CronJob — to recover the Helm and GitOps
@@ -90,14 +93,14 @@ scanner:
   # that wins over this value.
   argocdNamespace: "argocd"
 
-  # -- Names of the imagePullSecrets the scanner is allowed to read. When empty,
-  # the ClusterRole grants `secrets get` cluster-wide. Naming your pull secrets
-  # here narrows the grant to those names via RBAC `resourceNames` — the
-  # recommended setting. Names match in every namespace: a Secret called
-  # `regcred` anywhere in the cluster is readable, so use distinct names if that
-  # matters to you. A Secret left off the list is not readable, and images that
-  # need it fall back to an anonymous pull — the agent logs a warning naming the
-  # Secret. Only used when `scanner.resolveImagePullSecrets` is "true".
+  # -- Names of the imagePullSecrets the scanner is allowed to read. Required
+  # when `scanner.resolveImagePullSecrets` is "true": the ClusterRole grants
+  # `secrets get` only on these names via RBAC `resourceNames`, and an empty
+  # list fails the render rather than granting every Secret in the cluster.
+  # Names match in every namespace: a Secret called `regcred` anywhere in the
+  # cluster is readable, so use distinct names if that matters to you. A Secret
+  # left off the list is not readable, and images that need it fall back to an
+  # anonymous pull — the agent logs a warning naming the Secret.
   imagePullSecretNames: []
 
 watcher:
@@ -119,13 +122,15 @@ watcher:
   # it cannot bind a privileged port.
   healthPort: "8081"
 
-  # -- Resource requests and limits for the watcher Deployment.
+  # -- Resource requests and limits for the watcher Deployment. No CPU limit is
+  # set by default — CPU is compressible, and a limit only throttles syft
+  # mid-scan on a node that has cycles to spare. Clusters that enforce
+  # LimitRanges or quotas can set one with `watcher.resources.limits.cpu`.
   resources:
     requests:
       cpu: 50m
       memory: 512Mi
     limits:
-      cpu: 2000m
       memory: 1Gi
 
 proxy:
@@ -164,10 +169,13 @@ caBundle:
 networkPolicy:
   # -- Create a NetworkPolicy for the scanner pod. Ingress is denied except the
   # health port the kubelet probes on; egress is allowed to the destinations in
-  # `networkPolicy.egress`. Requires a CNI that enforces NetworkPolicy — with
-  # one that does not, the object is inert rather than a false sense of safety,
-  # so confirm yours enforces policy before treating this as a control.
-  enabled: false
+  # `networkPolicy.egress` — by default DNS, the Kubernetes API server and TCP
+  # 443 (the StackRadar API and your registries). On by default so the agent's
+  # reach is an object you can read, not a promise. Requires a CNI that
+  # enforces NetworkPolicy — with one that does not, the object is inert rather
+  # than a false sense of safety. Set to false if a registry on a non-443 port
+  # stops being scanned and you would rather not write an egress rule for it.
+  enabled: true
 
   # -- Egress rules, written in the API's own `spec.egress` shape. Left empty,
   # the chart renders defaults covering DNS, the Kubernetes API server, and TCP

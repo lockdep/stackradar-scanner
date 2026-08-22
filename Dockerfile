@@ -40,7 +40,7 @@ RUN pnpm install --prod --frozen-lockfile --ignore-scripts
 # tarball. Nothing downloaded here is executed before it has been verified.
 FROM base AS syft
 # renovate: datasource=github-releases depName=anchore/syft
-ARG SYFT_VERSION=1.19.0
+ARG SYFT_VERSION=1.42.1
 # Filled in by BuildKit from the target platform. It must be declared without a
 # default: a default value shadows the builder's, and the build would then pull
 # an amd64 binary for an arm64 image. The fallback below is for the legacy

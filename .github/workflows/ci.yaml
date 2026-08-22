@@ -131,17 +131,17 @@ jobs:
           # rejected, same as every other watcher value.
           render --set stackradar.existingSecret=my-secret \
                  --set-string watcher.healthPort=9090
-          # The three states of the `secrets get` rule: cluster-wide (the
-          # default, covered by every case above), narrowed to named Secrets
-          # via resourceNames, and absent. `--set-string` because
-          # resolveImagePullSecrets is a string value — a bare `=false` reaches
+          # The two states of the `secrets get` rule: absent (the default,
+          # covered by every case above) and narrowed to named Secrets via
+          # resourceNames. A cluster-wide grant is not a state the chart will
+          # render — asserted below. `--set-string` because
+          # resolveImagePullSecrets is a string value — a bare `=true` reaches
           # the schema as a boolean and is rejected.
           render --set stackradar.existingSecret=my-secret \
+                 --set-string scanner.resolveImagePullSecrets=true \
                  --set 'scanner.imagePullSecretNames={regcred,ghcr-creds}'
+          # Names without the feature on: harmless, no rule rendered.
           render --set stackradar.existingSecret=my-secret \
-                 --set-string scanner.resolveImagePullSecrets=false
-          render --set stackradar.existingSecret=my-secret \
-                 --set-string scanner.resolveImagePullSecrets=false \
                  --set 'scanner.imagePullSecretNames={regcred}'
           render --set stackradar.existingSecret=my-secret \
                  --set stackradar.existingSecretKeyApiKey=key \
@@ -424,6 +424,41 @@ jobs:
           fi
           echo "ok: no pod annotations without any configured"
 
+      # The ClusterRole's `secrets get` rule must never be unrestricted. The
+      # chart enforces that with a `fail` in the template; this checks the
+      # fail still fires and that the rendered rule carries resourceNames.
+      - name: Assert secrets are never granted cluster-wide
+        run: |
+          set -euo pipefail
+
+          if helm template stackradar-scanner helm/ --namespace stackradar \
+               --set stackradar.existingSecret=my-secret \
+               --set-string scanner.resolveImagePullSecrets=true >/dev/null 2>&1; then
+            echo "::error file=helm/templates/clusterrole.yaml::resolveImagePullSecrets=true with no" \
+                 "imagePullSecretNames rendered — that is a cluster-wide secrets grant"
+            exit 1
+          fi
+          echo "ok: cluster-wide secrets grant refused"
+
+          out=$(helm template stackradar-scanner helm/ --namespace stackradar \
+                --set stackradar.existingSecret=my-secret)
+          if printf '%s' "${out}" | yq 'select(.kind == "ClusterRole") | .rules[].resources[]' | grep -q '^secrets$'; then
+            echo "::error file=helm/templates/clusterrole.yaml::the default render grants secrets"
+            exit 1
+          fi
+          echo "ok: no secrets rule by default"
+
+          out=$(helm template stackradar-scanner helm/ --namespace stackradar \
+                --set stackradar.existingSecret=my-secret \
+                --set-string scanner.resolveImagePullSecrets=true \
+                --set 'scanner.imagePullSecretNames={regcred}')
+          names=$(printf '%s' "${out}" | yq 'select(.kind == "ClusterRole") | .rules[] | select(.resources[] == "secrets") | .resourceNames[]')
+          if [ "${names}" != "regcred" ]; then
+            echo "::error file=helm/templates/clusterrole.yaml::secrets rule resourceNames='${names}', want 'regcred'"
+            exit 1
+          fi
+          echo "ok: secrets rule narrowed to named Secrets"
+
       # A NetworkPolicy is a claim about the pod's network surface that a
       # reviewer checks with `kubectl get networkpolicy`, so the ways it can be
       # wrong are all quiet ones: a podSelector that matches nothing enforces
@@ -435,13 +470,23 @@ jobs:
           set -euo pipefail
 
           out=$(helm template stackradar-scanner helm/ --namespace stackradar \
-                --set stackradar.existingSecret=my-secret)
+                --set stackradar.existingSecret=my-secret \
+                --set networkPolicy.enabled=false)
           if printf '%s' "${out}" | grep -q "kind: NetworkPolicy"; then
-            echo "::error file=helm/templates/networkpolicy.yaml::the default render contains a" \
-                 "NetworkPolicy; networkPolicy.enabled defaults to false and must render nothing"
+            echo "::error file=helm/templates/networkpolicy.yaml::networkPolicy.enabled=false" \
+                 "still renders a NetworkPolicy"
             exit 1
           fi
-          echo "ok: no NetworkPolicy unless asked for"
+          echo "ok: no NetworkPolicy when disabled"
+
+          out=$(helm template stackradar-scanner helm/ --namespace stackradar \
+                --set stackradar.existingSecret=my-secret)
+          if ! printf '%s' "${out}" | grep -q "kind: NetworkPolicy"; then
+            echo "::error file=helm/values.yaml::the default render contains no NetworkPolicy;" \
+                 "networkPolicy.enabled defaults to true"
+            exit 1
+          fi
+          echo "ok: NetworkPolicy rendered by default"
 
           out=$(helm template stackradar-scanner helm/ --namespace stackradar \
                 --set stackradar.existingSecret=my-secret \

@@ -18,6 +18,33 @@ Removed, Fixed, Security — so use those six and nothing else.
 
 ## [Unreleased]
 
+### Security
+
+- **Reading pull Secrets is now opt-in, and never cluster-wide.**
+  `scanner.resolveImagePullSecrets` defaults to `"false"`, and turning it on
+  requires naming the Secrets in `scanner.imagePullSecretNames` — the chart
+  fails to render rather than grant `secrets get` on every Secret in the
+  cluster, which is what the previous default did. **Existing installs that
+  rely on pod `imagePullSecrets` for private registries must set both values
+  on upgrade**, or those images fall back to an anonymous pull and stop being
+  scanned; the agent logs a warning naming each Secret it could not read.
+  Installs using `dockerConfigSecret` or public registries are unaffected.
+- **The NetworkPolicy is on by default.** `networkPolicy.enabled` defaults to
+  `true`: ingress only on the health port, egress only to DNS, the Kubernetes
+  API server and TCP 443. A registry on another port needs a rule in
+  `networkPolicy.egress`, or `networkPolicy.enabled=false`. On a CNI that does
+  not enforce NetworkPolicy the object is inert.
+- **syft 1.42.1** (from 1.19.0), matching the version the StackRadar server
+  runs and clearing the advisories in between.
+
+### Changed
+
+- **The chart no longer sets a CPU limit by default.** CPU is compressible, and
+  the previous `2000m` limit only throttled syft mid-scan on nodes with cycles
+  to spare. The `50m` CPU request and `1Gi` memory limit are unchanged, and
+  clusters that enforce LimitRanges or quotas can still set a limit with
+  `watcher.resources.limits.cpu`.
+
 ## [0.1.9] - 2026-08-18
 
 ### Fixed

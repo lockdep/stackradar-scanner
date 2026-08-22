@@ -13,20 +13,28 @@ rules:
     resources: ["pods"]
     verbs: ["list", "watch"]
   {{- if eq (.Values.scanner.resolveImagePullSecrets | toString) "true" }}
-  # Read imagePullSecrets to resolve private registry credentials per workload.
-  {{- if .Values.scanner.imagePullSecretNames }}
-  # Narrowed to the names in `scanner.imagePullSecretNames`. resourceNames is
+  {{- /*
+  A `secrets get` rule with no resourceNames is `get` on every Secret in the
+  cluster, for an agent that only ever needs the handful named in pod specs.
+  Anything that ends up holding this ServiceAccount's token — a supply-chain
+  compromise of the image, a hole in syft, a stolen token — could then read any
+  Secret whose name it can guess. So the chart will not render that rule: the
+  names are required, and the trade-off is stated here rather than discovered
+  in an audit.
+  */ -}}
+  {{- if not .Values.scanner.imagePullSecretNames }}
+  {{- fail "scanner.resolveImagePullSecrets is true but scanner.imagePullSecretNames is empty. The chart will not grant `secrets get` on every Secret in the cluster: name the pull Secrets the scanner may read (e.g. --set 'scanner.imagePullSecretNames={regcred,ghcr-creds}'), or set scanner.resolveImagePullSecrets=false and mount one static pull secret via dockerConfigSecret." }}
+  {{- end }}
+  # Read imagePullSecrets to resolve private registry credentials per workload,
+  # narrowed to the names in `scanner.imagePullSecretNames`. resourceNames is
   # legal here because the agent only ever `get`s a Secret by name — it never
   # lists or watches them. Note this matches those names in every namespace:
   # a ClusterRole has no namespace to scope them to.
-  {{- end }}
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["get"]
-    {{- with .Values.scanner.imagePullSecretNames }}
     resourceNames:
-      {{- toYaml . | nindent 6 }}
-    {{- end }}
+      {{- toYaml .Values.scanner.imagePullSecretNames | nindent 6 }}
   {{- end }}
   {{- if eq (.Values.scanner.resolveWorkloadOwners | toString) "true" }}
   # Read the metadata of the object a pod belongs to.
