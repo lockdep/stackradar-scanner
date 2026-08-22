@@ -717,6 +717,7 @@ jobs:
           # silently did not render is the opposite of that.
           refute "networkPolicy.egress with networkPolicy.enabled=false" "renders no NetworkPolicy" \
             --set stackradar.existingSecret=my-secret \
+            --set networkPolicy.enabled=false \
             --set 'networkPolicy.egress[0].ports[0].port=443'
 
           # The rules are a list of NetworkPolicy egress entries. A scalar here
