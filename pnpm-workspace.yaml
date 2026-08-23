@@ -1,0 +1,5 @@
+ignoreScripts: true
+onlyBuiltDependencies:
+  - esbuild
+# Refuse packages published less than 7 days ago. Requires pnpm >= 10.16.0.
+minimumReleaseAge: 10080

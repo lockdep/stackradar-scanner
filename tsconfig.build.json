@@ -1,0 +1,8 @@
+{
+  // Emit configuration. Tests are typechecked by tsconfig.json but never
+  // compiled: emitting them put a second copy of every test in dist/, which
+  // vitest then ran alongside the real ones and the Dockerfile copied into the
+  // runtime image the scanner ships to customers.
+  "extends": "./tsconfig.json",
+  "exclude": ["node_modules", "dist", "src/**/*.test.ts"]
+}

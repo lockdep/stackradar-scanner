@@ -1,0 +1,304 @@
+{{- if .Values.watcher.enabled }}
+{{- /*
+The digest, not the tag, selects the image: the reference below renders as
+`repository:tag@digest`, and a digest wins. Overriding only the tag would
+therefore run the chart's pinned image while every `kubectl describe` showed the
+tag the user asked for. Fail instead.
+
+The `.Values.image.tag` term is what keeps this from firing on a chart whose tag
+is the empty default — which is every chart built outside CI.
+*/ -}}
+{{- if and .Values.image.digest .Values.image.tag (ne .Values.image.tag .Chart.AppVersion) }}
+{{- fail (printf "image.tag is set to %q but image.digest (%s) still pins a different image, and the digest wins. To run a different image, clear the digest as well: --set image.tag=%s --set image.digest=\"\"" .Values.image.tag .Values.image.digest .Values.image.tag) }}
+{{- end }}
+{{- /*
+One bundle, from one object. Preferring the ConfigMap silently would mean a
+cluster whose Secret-borne CA never reaches the pod, diagnosed as "the CA does
+not work" rather than "the chart ignored it" — the same argument as the
+tag/digest conflict above.
+*/ -}}
+{{- if and .Values.caBundle.configMapName .Values.caBundle.secretName }}
+{{- fail (printf "caBundle.configMapName (%s) and caBundle.secretName (%s) are both set, and the bundle can only come from one of them. Clear whichever one you do not want." .Values.caBundle.configMapName .Values.caBundle.secretName) }}
+{{- end }}
+{{- $caBundleSource := or .Values.caBundle.configMapName .Values.caBundle.secretName }}
+{{- if and $caBundleSource (not .Values.caBundle.key) }}
+{{- fail (printf "caBundle.key is empty, so the chart does not know which key of %q holds the PEM bundle. Set it to the key name, or leave it at the default \"ca-certificates.crt\"." $caBundleSource) }}
+{{- end }}
+{{- /*
+The bundle is mounted under a directory of its own and never over
+`/etc/ssl/certs`: a volume mounted there would shadow the image's own trust
+store, and the agent would trust the private CA and nothing else.
+*/ -}}
+{{- $caBundleDir := "/etc/ssl/stackradar" }}
+{{- $caBundlePath := printf "%s/ca-certificates.crt" $caBundleDir }}
+{{- $secretName := .Values.stackradar.existingSecret | default (include "stackradar-scanner.fullname" .) }}
+{{- $secretKeyApiKey := .Values.stackradar.existingSecretKeyApiKey | default "api-key" }}
+{{- $secretKeyClusterId := .Values.stackradar.existingSecretKeyClusterId | default "cluster-id" }}
+{{- /*
+The in-cluster addresses are appended to whatever the user listed, never
+replaced. Reaching the API server through a corporate proxy fails, or worse
+succeeds via a route nobody intended, and the agent talks to it constantly.
+*/ -}}
+{{- $noProxy := join "," (append (compact (list .Values.proxy.noProxy)) "kubernetes.default.svc,.svc,.cluster.local,localhost,127.0.0.1") }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "stackradar-scanner.fullname" . }}-watcher
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "stackradar-scanner.labels" . | nindent 4 }}
+    app.kubernetes.io/component: watcher
+spec:
+  replicas: 1
+  {{- /*
+  One scanner at a time. The default RollingUpdate keeps the old pod until the
+  new one is Ready, so every upgrade briefly runs two informers, two heartbeats
+  and two full-set inventory replacements against the same cluster key. A few
+  seconds of no scanner is the cheaper of the two.
+  */}}
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "stackradar-scanner.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: watcher
+  template:
+    metadata:
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "stackradar-scanner.podLabels" (dict "root" . "component" "watcher") | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "stackradar-scanner.serviceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      terminationGracePeriodSeconds: 30
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: {{ .Values.watcher.scratchSizeLimit | quote }}
+        {{- if $caBundleSource }}
+        - name: ca-bundle
+          {{- if .Values.caBundle.configMapName }}
+          configMap:
+            name: {{ .Values.caBundle.configMapName }}
+          {{- else }}
+          secret:
+            secretName: {{ .Values.caBundle.secretName }}
+          {{- end }}
+            # Only the named key is projected, under a fixed filename: the env
+            # vars below then point at a stable path whatever the key is called,
+            # and no other key of the object lands in a directory the trust
+            # store reads.
+            items:
+              - key: {{ .Values.caBundle.key }}
+                path: ca-certificates.crt
+        {{- end }}
+        {{- if .Values.dockerConfigSecret }}
+        - name: docker-config
+          secret:
+            secretName: {{ .Values.dockerConfigSecret }}
+            items:
+              - key: .dockerconfigjson
+                path: config.json
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.priorityClassName }}
+      priorityClassName: {{ .Values.priorityClassName }}
+      {{- end }}
+
+      containers:
+        - name: watcher
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}{{- if .Values.image.digest }}@{{ .Values.image.digest }}{{- end }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          command: ["node", "dist/src/watch.js"]
+
+          {{- /*
+          Named, not just numbered, so a NetworkPolicy can allow the kubelet in
+          by name and stay correct if the port ever moves. No Service points at
+          it — the probes are the only client.
+          */}}
+          ports:
+            - name: health
+              containerPort: {{ .Values.watcher.healthPort | int }}
+              protocol: TCP
+
+          env:
+            - name: NODE_OPTIONS
+              value: "--max-old-space-size=256"
+            # syft defaults to calling Anchore on every run to ask whether a
+            # newer syft exists. The agent forces this off in the environment
+            # it hands to syft regardless; set here as well so the pod spec
+            # itself documents that the only egress is the API and registries.
+            - name: SYFT_CHECK_FOR_APP_UPDATE
+              value: "false"
+            # Reported to the control plane via the `X-Scanner-Version` header
+            # so the UI can flag clusters running an outdated Helm chart.
+            - name: STACKRADAR_SCANNER_VERSION
+              value: {{ .Chart.Version | quote }}
+            - name: STACKRADAR_API_URL
+              value: {{ required "stackradar.apiUrl is required" .Values.stackradar.apiUrl | quote }}
+            - name: STACKRADAR_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretName }}
+                  key: {{ $secretKeyApiKey }}
+            - name: STACKRADAR_CLUSTER_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretName }}
+                  key: {{ $secretKeyClusterId }}
+            - name: EXCLUDE_NAMESPACES
+              value: {{ .Values.scanner.excludeNamespaces | quote }}
+            {{- if .Values.scanner.includeNamespaces }}
+            - name: INCLUDE_NAMESPACES
+              value: {{ .Values.scanner.includeNamespaces | quote }}
+            {{- end }}
+            {{- if .Values.scanner.excludeImages }}
+            - name: EXCLUDE_IMAGES
+              value: {{ .Values.scanner.excludeImages | quote }}
+            {{- end }}
+            - name: SYFT_TIMEOUT_MS
+              value: {{ .Values.scanner.syftTimeoutMs | int64 | toString | quote }}
+            - name: CONCURRENT_SCANS
+              value: {{ .Values.watcher.concurrentScans | int64 | toString | quote }}
+            - name: SWEEP_INTERVAL_MS
+              value: {{ .Values.watcher.sweepIntervalMs | int64 | toString | quote }}
+            - name: HEALTH_PORT
+              value: {{ .Values.watcher.healthPort | int64 | toString | quote }}
+            - name: SKIP_EXISTING_DIGESTS
+              value: {{ .Values.scanner.skipExistingDigests | toString | quote }}
+            - name: RESOLVE_IMAGE_PULL_SECRETS
+              value: {{ .Values.scanner.resolveImagePullSecrets | toString | quote }}
+            - name: RESOLVE_WORKLOAD_OWNERS
+              value: {{ .Values.scanner.resolveWorkloadOwners | toString | quote }}
+            - name: RESOLVE_ARGOCD_APPLICATIONS
+              value: {{ .Values.scanner.resolveArgocdApplications | toString | quote }}
+            - name: ARGOCD_NAMESPACE
+              value: {{ .Values.scanner.argocdNamespace | quote }}
+            {{- if .Values.dockerConfigSecret }}
+            - name: DOCKER_CONFIG
+              value: /home/node/.docker
+            {{- end }}
+            {{- /*
+            Two runtimes, two trust stores, and they do not read the same
+            variable. `NODE_EXTRA_CA_CERTS` appends to the roots Node ships
+            with. Go — syft — takes its roots from a list of files and a list of
+            directories, and each of `SSL_CERT_FILE` and `SSL_CERT_DIR`
+            *replaces* one of those lists rather than adding to it. So
+            `SSL_CERT_DIR` names our directory and the system one, and
+            `SSL_CERT_FILE` is deliberately not set: pointing it at the bundle
+            would drop the public roots the moment the image's own
+            `/etc/ssl/certs` stopped being a directory of individual certs, and
+            syft could no longer pull a public image.
+            */ -}}
+            {{- if $caBundleSource }}
+            - name: NODE_EXTRA_CA_CERTS
+              value: {{ $caBundlePath | quote }}
+            - name: SSL_CERT_DIR
+              value: {{ printf "%s:/etc/ssl/certs" $caBundleDir | quote }}
+            {{- end }}
+            {{- /*
+            Both spellings of every variable: syft reads the upper-case ones,
+            plenty of tooling reads only the lower-case ones, and a cluster
+            where the agent silently bypasses the proxy is the failure this
+            whole block exists to prevent. Nothing renders when no proxy is
+            configured, so an existing install sees no diff.
+            */ -}}
+            {{- if or .Values.proxy.httpProxy .Values.proxy.httpsProxy }}
+            {{- with .Values.proxy.httpProxy }}
+            - name: HTTP_PROXY
+              value: {{ . | quote }}
+            - name: http_proxy
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.proxy.httpsProxy }}
+            - name: HTTPS_PROXY
+              value: {{ . | quote }}
+            - name: https_proxy
+              value: {{ . | quote }}
+            {{- end }}
+            - name: NO_PROXY
+              value: {{ $noProxy | quote }}
+            - name: no_proxy
+              value: {{ $noProxy | quote }}
+            {{- end }}
+
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            {{- if .Values.dockerConfigSecret }}
+            - name: docker-config
+              mountPath: /home/node/.docker
+              readOnly: true
+            {{- end }}
+            {{- if $caBundleSource }}
+            - name: ca-bundle
+              mountPath: {{ $caBundleDir }}
+              readOnly: true
+            {{- end }}
+
+          resources:
+            {{- toYaml .Values.watcher.resources | nindent 12 }}
+
+          {{- /*
+          The probe this replaced ran `node -e process.exit(0)`, which spawned a
+          second Node process and proved only that the image contains a Node
+          binary. It could not fail while the node had memory, so the failure it
+          needed to catch — an informer that errors, fails to restart, and
+          leaves the process alive, Ready and watching nothing — was invisible
+          from outside the pod.
+
+          /healthz reports the informer's actual state: non-2xx once it has been
+          down for longer than three restart attempts, or after five consecutive
+          heartbeat failures. Event recency is deliberately not part of it, or a
+          cluster quiet overnight would restart itself.
+
+          failureThreshold 3 over a 60s period means a fault has to persist for
+          three minutes before the kubelet acts. An API server rolling, or a
+          30-second network blip, resolves well inside that.
+          */}}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 30
+            periodSeconds: 60
+            timeoutSeconds: 5
+            failureThreshold: 3
+
+          {{- /*
+          Readiness answers a narrower question: has the first informer sync
+          finished. A large cluster's initial list takes a while, and until it
+          returns the agent has not seen the pods it is there to scan — so the
+          Deployment should not report the rollout complete. It stays ready
+          afterwards; an informer that dies later is liveness' problem.
+          */}}
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+{{- end }}

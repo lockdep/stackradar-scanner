@@ -1,0 +1,924 @@
+name: CI
+
+# Continuous integration for the default branch and pull requests.
+#
+# This workflow never publishes a versioned artifact. Released images and charts
+# come exclusively from release.yaml, triggered by a `v*` tag — see RELEASING.md.
+# What main publishes is a moving `main` image tag for dogfooding and manual
+# testing; it is explicitly not something an external user should depend on.
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+env:
+  IMAGE: ghcr.io/lockdep/stackradar-scanner
+  # Helm is pinned rather than floating: `latest` silently moved onto Helm 4,
+  # which reworded the schema errors the chart's guards assert on. One pinned
+  # version is what the chart is tested against; Renovate bumps it (see
+  # .github/renovate.json5) so a new Helm arrives as a reviewable PR.
+  # renovate: datasource=github-releases depName=helm/helm
+  HELM_VERSION: 4.2.3
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0 — pnpm version comes from packageManager in package.json
+
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck and build
+        run: pnpm run build
+
+      - name: Run tests
+        run: pnpm test
+
+  chart:
+    name: Lint chart
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - name: Set up Helm
+        uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
+        with:
+          version: v${{ env.HELM_VERSION }}
+
+      # The in-repo chart must stay on the dev placeholder. A hand-edited version
+      # here would be silently overwritten by the release workflow, so catching it
+      # at PR time is cheaper than debugging a mismatched release later.
+      - name: Assert chart version is the dev placeholder
+        run: |
+          set -euo pipefail
+          for field in version appVersion; do
+            actual=$(yq ".${field}" helm/Chart.yaml)
+            if [ "${actual}" != "0.0.0-dev" ]; then
+              echo "::error file=helm/Chart.yaml::${field} is '${actual}', expected '0.0.0-dev'." \
+                   "Versions are stamped from the git tag at release time — do not bump this by hand." \
+                   "See RELEASING.md."
+              exit 1
+            fi
+          done
+
+      # The chart ships its own copy of the terms so they travel with the .tgz,
+      # which the license's Notices section requires. Two copies can drift.
+      - name: Assert chart license matches the repository license
+        run: |
+          set -euo pipefail
+          if ! diff -q LICENSE.md helm/LICENSE.md >/dev/null; then
+            echo "::error file=helm/LICENSE.md::helm/LICENSE.md differs from LICENSE.md." \
+                 "Run: cp LICENSE.md helm/LICENSE.md"
+            diff LICENSE.md helm/LICENSE.md || true
+            exit 1
+          fi
+
+      # CHANGELOG.md is chart metadata: the release workflow publishes the
+      # section matching the tag as the GitHub Release notes and as the chart's
+      # artifacthub.io/changes annotation. A `###` heading that is not an
+      # ArtifactHub change kind still publishes, silently relabelled — which is
+      # exactly the kind of thing nobody notices until it is on ArtifactHub.
+      - name: Validate CHANGELOG.md
+        run: python3 .github/scripts/changelog.py --check
+
+      - name: Lint chart
+        run: helm lint helm/ --strict
+
+      # Render the permutations that exercise the conditional branches in the
+      # templates, so a broken `{{- if }}` surfaces here rather than at install.
+      - name: Render templates
+        run: |
+          set -euo pipefail
+          render() {
+            echo "--- helm template $* ---"
+            helm template stackradar-scanner helm/ --namespace stackradar "$@" >/dev/null
+          }
+          render --set stackradar.clusterId=test --set stackradar.apiKey=test
+          render --set stackradar.existingSecret=my-secret
+          render --set stackradar.existingSecret=my-secret --set dockerConfigSecret=regcred
+          render --set stackradar.existingSecret=my-secret --set scanner.includeNamespaces=default
+          # Image exclusion. The comma inside the value is escaped, or `--set`
+          # reads it as two keys and the second pattern is silently lost.
+          render --set stackradar.existingSecret=my-secret \
+                 --set 'scanner.excludeImages=registry.k8s.io/*\,*/pause'
+          render --set stackradar.existingSecret=my-secret --set watcher.enabled=false
+          # The health endpoints moved off their default port, in both
+          # spellings: `--set` hands the schema an integer and a values file
+          # may carry a string, and the chart accepts either.
+          render --set stackradar.existingSecret=my-secret \
+                 --set-string watcher.healthPort=9090
+          render --set stackradar.existingSecret=my-secret \
+                 --set watcher.healthPort=9090
+          # Every flag the README shows with a bare `--set`, as the README
+          # shows it. A schema that rejected `=false` as "Expected: string,
+          # given: boolean" is what this guards against.
+          render --set stackradar.existingSecret=my-secret \
+                 --set scanner.resolveWorkloadOwners=false \
+                 --set scanner.resolveArgocdApplications=false \
+                 --set scanner.skipExistingDigests=false \
+                 --set scanner.syftTimeoutMs=60000 \
+                 --set watcher.concurrentScans=2 \
+                 --set watcher.sweepIntervalMs=0
+          render --set stackradar.existingSecret=my-secret \
+                 --set-string scanner.resolveWorkloadOwners=false \
+                 --set-string watcher.concurrentScans=2
+          # The two states of the `secrets get` rule: absent (the default,
+          # covered by every case above) and narrowed to named Secrets via
+          # resourceNames. A cluster-wide grant is not a state the chart will
+          # render — asserted below. `--set-string` because
+          # resolveImagePullSecrets is a string value — a bare `=true` reaches
+          # the schema as a boolean and is rejected.
+          render --set stackradar.existingSecret=my-secret \
+                 --set-string scanner.resolveImagePullSecrets=true \
+                 --set 'scanner.imagePullSecretNames={regcred,ghcr-creds}'
+          # Names without the feature on: harmless, no rule rendered.
+          render --set stackradar.existingSecret=my-secret \
+                 --set 'scanner.imagePullSecretNames={regcred}'
+          render --set stackradar.existingSecret=my-secret \
+                 --set stackradar.existingSecretKeyApiKey=key \
+                 --set stackradar.existingSecretKeyClusterId=id
+          render --set stackradar.existingSecret=my-secret \
+                 --set nameOverride=scanner --set fullnameOverride=my-scanner
+          # Proxy: each URL on its own, both together, and with a user-supplied
+          # bypass list that the in-cluster addresses are appended to. The
+          # default case — no proxy env vars rendered at all — is covered by
+          # every other case here.
+          render --set stackradar.existingSecret=my-secret \
+                 --set proxy.httpsProxy=http://proxy.corp:8080
+          render --set stackradar.existingSecret=my-secret \
+                 --set proxy.httpProxy=http://proxy.corp:8080
+          render --set stackradar.existingSecret=my-secret \
+                 --set proxy.httpProxy=http://proxy.corp:8080 \
+                 --set proxy.httpsProxy=http://proxy.corp:8443 \
+                 --set 'proxy.noProxy=registry.internal\,.corp'
+          # CA bundle: from a ConfigMap, from a Secret, under a non-default
+          # key, and together with a proxy — a TLS-terminating proxy is the
+          # reason the value exists, so that pair has to render.
+          render --set stackradar.existingSecret=my-secret \
+                 --set caBundle.configMapName=corp-ca
+          render --set stackradar.existingSecret=my-secret \
+                 --set caBundle.secretName=corp-ca \
+                 --set caBundle.key=corp-root.pem
+          render --set stackradar.existingSecret=my-secret \
+                 --set caBundle.configMapName=corp-ca \
+                 --set proxy.httpsProxy=http://proxy.corp:8080
+          # Cloud workload identity: the ServiceAccount annotation each of EKS
+          # and GKE reads, the pod label plus annotation Azure reads, and all
+          # of them at once. `--set-string` throughout — a role ARN is a string
+          # anyway, but Azure's `use` label is the literal string "true" and a
+          # bare `--set` turns it into a boolean the schema rejects.
+          render --set stackradar.existingSecret=my-secret \
+                 --set-string 'serviceAccount.annotations.eks\.amazonaws\.com/role-arn=arn:aws:iam::123456789012:role/StackRadarScanner'
+          render --set stackradar.existingSecret=my-secret \
+                 --set-string 'serviceAccount.annotations.iam\.gke\.io/gcp-service-account=scanner@example.iam.gserviceaccount.com'
+          render --set stackradar.existingSecret=my-secret \
+                 --set-string 'podLabels.azure\.workload\.identity/use=true' \
+                 --set-string 'podAnnotations.azure\.workload\.identity/client-id=00000000-0000-0000-0000-000000000000'
+          # A ServiceAccount the chart does not create, with no annotations on
+          # it — the combination the guard below must *not* fire on.
+          render --set stackradar.existingSecret=my-secret \
+                 --set serviceAccount.create=false \
+                 --set serviceAccount.name=my-own-sa
+          # NetworkPolicy: the defaults, a list of the customer's own replacing
+          # them, and the workload identity case that adds the metadata
+          # endpoint rule. `watcher.enabled=false` renders no pod, so it must
+          # render no policy either.
+          render --set stackradar.existingSecret=my-secret \
+                 --set networkPolicy.enabled=true
+          render --set stackradar.existingSecret=my-secret \
+                 --set networkPolicy.enabled=true \
+                 --set 'networkPolicy.egress[0].to[0].ipBlock.cidr=10.0.0.0/8' \
+                 --set 'networkPolicy.egress[0].ports[0].port=443'
+          render --set stackradar.existingSecret=my-secret \
+                 --set networkPolicy.enabled=true \
+                 --set-string 'serviceAccount.annotations.eks\.amazonaws\.com/role-arn=arn:aws:iam::123456789012:role/StackRadarScanner'
+          render --set stackradar.existingSecret=my-secret \
+                 --set networkPolicy.enabled=true --set watcher.enabled=false
+          # A released chart: the stamped tag matches appVersion and a digest
+          # pins the bytes. Must render — this is what every customer installs.
+          render --set stackradar.existingSecret=my-secret \
+                 --set image.tag=0.0.0-dev \
+                 --set image.digest=sha256:0000000000000000000000000000000000000000000000000000000000000000
+          # An override that clears the digest along with the tag.
+          render --set stackradar.existingSecret=my-secret \
+                 --set image.tag=1.3.0 \
+                 --set image.digest=
+
+      # Two invariants that a template edit could break without breaking any
+      # render: an install that sets no proxy must be byte-identical to one
+      # from before proxy support existed, and an install that does set one
+      # must never send Kubernetes API traffic through it.
+      - name: Assert proxy env rendering
+        run: |
+          set -euo pipefail
+
+          # Captured before grepping, not piped into it: a `helm template` that
+          # fails outright produces no output and would otherwise satisfy the
+          # "must not mention a proxy" check by rendering nothing at all.
+          out=$(helm template stackradar-scanner helm/ --namespace stackradar \
+                --set stackradar.existingSecret=my-secret)
+          if printf '%s' "${out}" | grep -iq "proxy"; then
+            echo "::error file=helm/templates/deployment.yaml::the default render mentions a proxy;" \
+                 "unset proxy values must render nothing at all"
+            exit 1
+          fi
+          echo "ok: no proxy env vars without a configured proxy"
+
+          out=$(helm template stackradar-scanner helm/ --namespace stackradar \
+                --set stackradar.existingSecret=my-secret \
+                --set proxy.httpsProxy=http://proxy.corp:8080)
+          for var in NO_PROXY no_proxy; do
+            if ! printf '%s' "${out}" | grep -A1 "name: ${var}$" \
+                 | grep -q "kubernetes.default.svc,.svc,.cluster.local,localhost,127.0.0.1"; then
+              echo "::error file=helm/templates/deployment.yaml::${var} does not exempt the in-cluster" \
+                   "Kubernetes API — the agent would reach the API server through the proxy"
+              exit 1
+            fi
+          done
+          echo "ok: the Kubernetes API bypasses the proxy"
+
+      # Helm parses a bare YAML integer above 2^24 or so as a float64, and
+      # `toString` then renders `21600000` as `2.16e+07`. Node's parseInt reads
+      # that as 2, which turned the six-hour sweep into one every two
+      # milliseconds and starved the heartbeat. Every numeric env must render
+      # as plain digits, whichever spelling the values file uses.
+      - name: Assert numeric env rendering
+        run: |
+          set -euo pipefail
+          for spelling in "" "--set watcher.sweepIntervalMs=21600000 --set scanner.syftTimeoutMs=300000"; do
+            # shellcheck disable=SC2086
+            out=$(helm template stackradar-scanner helm/ --namespace stackradar \
+                  --set stackradar.existingSecret=my-secret ${spelling})
+            for var in SYFT_TIMEOUT_MS CONCURRENT_SCANS SWEEP_INTERVAL_MS HEALTH_PORT; do
+              value=$(printf '%s' "${out}" | grep -A1 "name: ${var}$" | sed -n 's/.*value: "\(.*\)"/\1/p')
+              if ! printf '%s' "${value}" | grep -Eq '^[0-9]+$'; then
+                echo "::error file=helm/templates/deployment.yaml::${var} renders as '${value}', not an integer"
+                exit 1
+              fi
+            done
+          done
+          echo "ok: numeric env vars render as integers"
+
+      # The CA bundle has the same two invariants as the proxy — an unset
+      # default that renders nothing, and one thing it must never do. Here that
+      # is dropping the public roots: `SSL_CERT_FILE` replaces Go's trust store
+      # rather than adding to it, so a well-meaning edit that sets it would
+      # leave the agent trusting the customer's CA and no public registry.
+      - name: Assert CA bundle env rendering
+        run: |
+          set -euo pipefail
+
+          out=$(helm template stackradar-scanner helm/ --namespace stackradar \
+                --set stackradar.existingSecret=my-secret)
+          if printf '%s' "${out}" | grep -qE "ca-bundle|CA_CERTS|SSL_CERT"; then
+            echo "::error file=helm/templates/deployment.yaml::the default render mentions a CA bundle;" \
+                 "an unset caBundle must render no volume and no env vars at all"
+            exit 1
+          fi
+          echo "ok: no CA bundle without one configured"
+
+          out=$(helm template stackradar-scanner helm/ --namespace stackradar \
+                --set stackradar.existingSecret=my-secret \
+                --set caBundle.configMapName=corp-ca)
+
+          if printf '%s' "${out}" | grep -q "SSL_CERT_FILE"; then
+            echo "::error file=helm/templates/deployment.yaml::SSL_CERT_FILE is set." \
+                 "It replaces Go's trust store instead of extending it, so syft would" \
+                 "lose the public roots and could no longer pull a public image." \
+                 "Extend SSL_CERT_DIR instead."
+            exit 1
+          fi
+          echo "ok: SSL_CERT_FILE is not set"
+
+          if ! printf '%s' "${out}" | grep -A1 "name: SSL_CERT_DIR$" | grep -q "/etc/ssl/certs"; then
+            echo "::error file=helm/templates/deployment.yaml::SSL_CERT_DIR does not include" \
+                 "/etc/ssl/certs — SSL_CERT_DIR replaces Go's directory list, so omitting the" \
+                 "system directory drops the public roots"
+            exit 1
+          fi
+          if ! printf '%s' "${out}" | grep -A1 "name: NODE_EXTRA_CA_CERTS$" \
+               | grep -q "/etc/ssl/stackradar/ca-certificates.crt"; then
+            echo "::error file=helm/templates/deployment.yaml::NODE_EXTRA_CA_CERTS does not point" \
+                 "at the mounted bundle — the agent's own API traffic would not trust the CA"
+            exit 1
+          fi
+          echo "ok: both runtimes are pointed at the bundle, public roots kept"
+
+      # The probe this replaced ran `node -e process.exit(0)` — a second Node
+      # process that exits 0 whatever the watcher is doing, and so a probe that
+      # could not fail. The new one asks the running process, over the port that
+      # process was told to bind, which means three things have to agree:
+      # the container port, the HEALTH_PORT env var, and what the probes name.
+      # Nothing else in the repo notices when one of them moves, and the symptom
+      # of a disagreement is a pod that restarts forever while being perfectly
+      # healthy.
+      - name: Assert the health probes reach the port the agent binds
+        run: |
+          set -euo pipefail
+
+          # $1 = the port the render should agree on, rest = extra helm args.
+          check_probes() {
+            local port="$1"; shift
+            local out container path
+
+            out=$(helm template stackradar-scanner helm/ --namespace stackradar \
+                  --set stackradar.existingSecret=my-secret "$@")
+            container=$(printf '%s' "${out}" | yq 'select(.kind == "Deployment") | .spec.template.spec.containers[0]')
+
+            for probe in livenessProbe readinessProbe; do
+              case "${probe}" in
+                livenessProbe)  path="/healthz" ;;
+                readinessProbe) path="/readyz"  ;;
+              esac
+
+              if [ "$(printf '%s' "${container}" | yq ".${probe} | has(\"exec\")")" = "true" ]; then
+                echo "::error file=helm/templates/deployment.yaml::${probe} is an exec probe." \
+                     "An exec probe runs beside the watcher instead of asking it anything," \
+                     "which is the failure this change removed: it cannot report an informer" \
+                     "that has stopped watching."
+                exit 1
+              fi
+
+              if [ "$(printf '%s' "${container}" | yq ".${probe}.httpGet.port")" != "health" ]; then
+                echo "::error file=helm/templates/deployment.yaml::${probe} does not target the" \
+                     "named 'health' port; a numeric port here drifts from the container port the" \
+                     "moment watcher.healthPort is overridden"
+                exit 1
+              fi
+
+              if [ "$(printf '%s' "${container}" | yq ".${probe}.httpGet.path")" != "${path}" ]; then
+                echo "::error file=helm/templates/deployment.yaml::${probe} does not request ${path}." \
+                     "The agent serves liveness on /healthz and readiness on /readyz and 404s" \
+                     "everything else, so a wrong path fails every probe."
+                exit 1
+              fi
+            done
+
+            declared=$(printf '%s' "${container}" | yq '.ports[] | select(.name == "health") | .containerPort')
+            passed=$(printf '%s' "${container}" | yq '.env[] | select(.name == "HEALTH_PORT") | .value')
+            if [ "${declared}" != "${port}" ] || [ "${passed}" != "${port}" ]; then
+              echo "::error file=helm/templates/deployment.yaml::the container port (${declared})," \
+                   "HEALTH_PORT (${passed}) and watcher.healthPort (${port}) disagree." \
+                   "The kubelet would probe a port the agent is not listening on."
+              exit 1
+            fi
+          }
+
+          check_probes 8081
+          check_probes 9090 --set-string watcher.healthPort=9090
+          echo "ok: both probes ask the agent, on the port it binds"
+
+      # `podLabels` is merged into the pod template's labels, which is also
+      # where the Deployment's `matchLabels` live. `matchLabels` is immutable
+      # after creation, so a podLabels entry that displaced one of them would
+      # install cleanly and fail the *next* upgrade — the worst possible time,
+      # with an error naming the selector rather than the value behind it. The
+      # merge order in `stackradar-scanner.podLabels` is the only thing
+      # preventing that, and nothing else notices if it is reversed.
+      - name: Assert podLabels cannot displace a selector label
+        run: |
+          set -euo pipefail
+
+          out=$(helm template stackradar-scanner helm/ --namespace stackradar \
+                --set stackradar.existingSecret=my-secret \
+                --set-string 'podLabels.app\.kubernetes\.io/name=hijacked' \
+                --set-string 'podLabels.app\.kubernetes\.io/instance=hijacked' \
+                --set-string 'podLabels.app\.kubernetes\.io/component=hijacked' \
+                --set-string 'podLabels.team=platform')
+
+          # Textual, deliberately: a template that emitted the chart's label and
+          # the user's as two lines under the same key would parse as the chart's
+          # value under most YAML readers and still be a manifest with a
+          # duplicate key in it. The displacing value must not reach the render
+          # at all.
+          if printf '%s' "${out}" | grep -q "hijacked"; then
+            echo "::error file=helm/templates/_helpers.tpl::a podLabels entry displaced a selector label." \
+                 "app.kubernetes.io/name, /instance and /component are in the Deployment's matchLabels," \
+                 "which is immutable after creation — this install would succeed and the next upgrade" \
+                 "would fail. The chart's labels must win the merge."
+            printf '%s\n' "${out}" | grep -n -B4 -A4 hijacked
+            exit 1
+          fi
+
+          # The same invariant read structurally rather than by string: whatever
+          # the selector says, the pod template says too.
+          selector=$(printf '%s' "${out}" | yq 'select(.kind == "Deployment") | .spec.selector.matchLabels')
+          labels=$(printf '%s' "${out}" | yq 'select(.kind == "Deployment") | .spec.template.metadata.labels')
+          for key in app.kubernetes.io/name app.kubernetes.io/instance app.kubernetes.io/component; do
+            want=$(printf '%s' "${selector}" | yq ".\"${key}\"")
+            got=$(printf '%s' "${labels}"   | yq ".\"${key}\"")
+            if [ "${got}" != "${want}" ]; then
+              echo "::error file=helm/templates/_helpers.tpl::the pod template's ${key} is '${got}'" \
+                   "but matchLabels says '${want}'; the selector would not match the pod it creates"
+              exit 1
+            fi
+          done
+          echo "ok: podLabels cannot displace a selector label"
+
+          # ...and the value is still worth setting: a label that collides with
+          # nothing has to survive the merge, or Azure Workload Identity never
+          # switches on.
+          if [ "$(printf '%s' "${labels}" | yq '.team')" != "platform" ]; then
+            echo "::error file=helm/templates/_helpers.tpl::a podLabels entry that collides with" \
+                 "nothing was dropped; podLabels would be inert"
+            exit 1
+          fi
+          echo "ok: a non-colliding podLabels entry reaches the pod"
+
+          # Unset renders nothing, same contract as the proxy and CA bundle: an
+          # empty `annotations:` key on the pod template is a diff every
+          # existing install would see for no reason.
+          out=$(helm template stackradar-scanner helm/ --namespace stackradar \
+                --set stackradar.existingSecret=my-secret)
+          if [ "$(printf '%s' "${out}" | yq 'select(.kind == "Deployment") | .spec.template.metadata | has("annotations")')" != "false" ]; then
+            echo "::error file=helm/templates/deployment.yaml::the default render puts an annotations" \
+                 "key on the pod template; unset podAnnotations must render nothing at all"
+            exit 1
+          fi
+          echo "ok: no pod annotations without any configured"
+
+      # The ClusterRole's `secrets get` rule must never be unrestricted. The
+      # chart enforces that with a `fail` in the template; this checks the
+      # fail still fires and that the rendered rule carries resourceNames.
+      # Cluster-scoped names carry the release namespace, so two releases on
+      # one cluster own two ClusterRoles rather than fighting over one. RBAC
+      # is gated by `rbac.create`, not by `serviceAccount.create`: a cluster
+      # that brings its own ServiceAccount still needs the rules, and the old
+      # coupling rendered none and a pod that 403'd on its first list.
+      - name: Assert RBAC naming and gating
+        run: |
+          set -euo pipefail
+          out="$(helm template stackradar-scanner helm/ --namespace scan-a \
+                   --set stackradar.existingSecret=my-secret)"
+          for kind in ClusterRole ClusterRoleBinding; do
+            name="$(printf '%s' "${out}" | yq "select(.kind == \"${kind}\") | .metadata.name")"
+            if [ "${name}" != "stackradar-scanner-scan-a" ]; then
+              echo "::error::${kind} is named '${name}', expected 'stackradar-scanner-scan-a' (fullname + release namespace)."
+              exit 1
+            fi
+          done
+          bound="$(printf '%s' "${out}" | yq 'select(.kind == "ClusterRoleBinding") | .roleRef.name')"
+          [ "${bound}" = "stackradar-scanner-scan-a" ] || { echo "::error::ClusterRoleBinding references '${bound}'."; exit 1; }
+
+          out="$(helm template stackradar-scanner helm/ --namespace stackradar \
+                   --set stackradar.existingSecret=my-secret \
+                   --set serviceAccount.create=false --set serviceAccount.name=my-own-sa)"
+          count="$(printf '%s' "${out}" | yq 'select(.kind == "ClusterRole") | .kind' | grep -c ClusterRole || true)"
+          [ "${count}" = "1" ] || { echo "::error::serviceAccount.create=false must still render the ClusterRole (got ${count})."; exit 1; }
+          subject="$(printf '%s' "${out}" | yq 'select(.kind == "ClusterRoleBinding") | .subjects[0].name')"
+          [ "${subject}" = "my-own-sa" ] || { echo "::error::ClusterRoleBinding binds '${subject}', expected my-own-sa."; exit 1; }
+
+          out="$(helm template stackradar-scanner helm/ --namespace stackradar \
+                   --set stackradar.existingSecret=my-secret --set rbac.create=false)"
+          if printf '%s' "${out}" | grep -q 'kind: ClusterRole'; then
+            echo "::error::rbac.create=false must render no ClusterRole or ClusterRoleBinding."
+            exit 1
+          fi
+          echo "RBAC naming and gating hold."
+
+      # The pod must be admissible under the `restricted` Pod Security
+      # Standard — the audience for a supply-chain agent — and a rollout must
+      # never run two scanners at once.
+      - name: Assert pod hardening and rollout shape
+        run: |
+          set -euo pipefail
+          out="$(helm template stackradar-scanner helm/ --namespace stackradar \
+                   --set stackradar.existingSecret=my-secret)"
+          dep="$(printf '%s' "${out}" | yq 'select(.kind == "Deployment")')"
+          check() {
+            local label="$1" path="$2" want="$3"
+            local got
+            got="$(printf '%s' "${dep}" | yq "${path}")"
+            if [ "${got}" != "${want}" ]; then
+              echo "::error::${label}: ${path} is '${got}', expected '${want}'."
+              exit 1
+            fi
+          }
+          check "seccomp" '.spec.template.spec.securityContext.seccompProfile.type' RuntimeDefault
+          check "strategy" '.spec.strategy.type' Recreate
+          check "scratch limit" '.spec.template.spec.volumes[] | select(.name == "tmp") | .emptyDir.sizeLimit' 4Gi
+          check "ephemeral-storage limit" '.spec.template.spec.containers[0].resources.limits."ephemeral-storage"' 6Gi
+          check "syft update check" '.spec.template.spec.containers[0].env[] | select(.name == "SYFT_CHECK_FOR_APP_UPDATE") | .value' false
+          check "grace period" '.spec.template.spec.terminationGracePeriodSeconds' 30
+          echo "Pod hardening and rollout shape hold."
+
+      - name: Assert secrets are never granted cluster-wide
+        run: |
+          set -euo pipefail
+
+          if helm template stackradar-scanner helm/ --namespace stackradar \
+               --set stackradar.existingSecret=my-secret \
+               --set-string scanner.resolveImagePullSecrets=true >/dev/null 2>&1; then
+            echo "::error file=helm/templates/clusterrole.yaml::resolveImagePullSecrets=true with no" \
+                 "imagePullSecretNames rendered — that is a cluster-wide secrets grant"
+            exit 1
+          fi
+          echo "ok: cluster-wide secrets grant refused"
+
+          out=$(helm template stackradar-scanner helm/ --namespace stackradar \
+                --set stackradar.existingSecret=my-secret)
+          if printf '%s' "${out}" | yq 'select(.kind == "ClusterRole") | .rules[].resources[]' | grep -q '^secrets$'; then
+            echo "::error file=helm/templates/clusterrole.yaml::the default render grants secrets"
+            exit 1
+          fi
+          echo "ok: no secrets rule by default"
+
+          out=$(helm template stackradar-scanner helm/ --namespace stackradar \
+                --set stackradar.existingSecret=my-secret \
+                --set-string scanner.resolveImagePullSecrets=true \
+                --set 'scanner.imagePullSecretNames={regcred}')
+          names=$(printf '%s' "${out}" | yq 'select(.kind == "ClusterRole") | .rules[] | select(.resources[] == "secrets") | .resourceNames[]')
+          if [ "${names}" != "regcred" ]; then
+            echo "::error file=helm/templates/clusterrole.yaml::secrets rule resourceNames='${names}', want 'regcred'"
+            exit 1
+          fi
+          echo "ok: secrets rule narrowed to named Secrets"
+
+      # A NetworkPolicy is a claim about the pod's network surface that a
+      # reviewer checks with `kubectl get networkpolicy`, so the ways it can be
+      # wrong are all quiet ones: a podSelector that matches nothing enforces
+      # nothing, an ingress rule that misses the health port restarts the pod in
+      # a loop, and a missing DNS rule stops every scan. None of them fail a
+      # render.
+      - name: Assert the NetworkPolicy polices the pod it names
+        run: |
+          set -euo pipefail
+
+          out=$(helm template stackradar-scanner helm/ --namespace stackradar \
+                --set stackradar.existingSecret=my-secret \
+                --set networkPolicy.enabled=false)
+          if printf '%s' "${out}" | grep -q "kind: NetworkPolicy"; then
+            echo "::error file=helm/templates/networkpolicy.yaml::networkPolicy.enabled=false" \
+                 "still renders a NetworkPolicy"
+            exit 1
+          fi
+          echo "ok: no NetworkPolicy when disabled"
+
+          out=$(helm template stackradar-scanner helm/ --namespace stackradar \
+                --set stackradar.existingSecret=my-secret)
+          if ! printf '%s' "${out}" | grep -q "kind: NetworkPolicy"; then
+            echo "::error file=helm/values.yaml::the default render contains no NetworkPolicy;" \
+                 "networkPolicy.enabled defaults to true"
+            exit 1
+          fi
+          echo "ok: NetworkPolicy rendered by default"
+
+          out=$(helm template stackradar-scanner helm/ --namespace stackradar \
+                --set stackradar.existingSecret=my-secret \
+                --set networkPolicy.enabled=true)
+          policy=$(printf '%s' "${out}" | yq 'select(.kind == "NetworkPolicy")')
+          labels=$(printf '%s' "${out}" | yq 'select(.kind == "Deployment") | .spec.template.metadata.labels')
+
+          # The invariant that makes the object worth anything: every label the
+          # policy selects on is a label the pod actually carries. A drift here
+          # leaves a policy that reads correctly and selects no pods.
+          for key in app.kubernetes.io/name app.kubernetes.io/instance app.kubernetes.io/component; do
+            want=$(printf '%s' "${policy}" | yq ".spec.podSelector.matchLabels.\"${key}\"")
+            got=$(printf '%s' "${labels}"  | yq ".\"${key}\"")
+            if [ "${want}" = "null" ] || [ "${want}" != "${got}" ]; then
+              echo "::error file=helm/templates/networkpolicy.yaml::the policy selects ${key}='${want}'" \
+                   "but the pod carries '${got}'; the policy would select no pods and enforce nothing"
+              exit 1
+            fi
+          done
+          echo "ok: the policy selects the watcher pod"
+
+          for type in Ingress Egress; do
+            if [ "$(printf '%s' "${policy}" | yq "[.spec.policyTypes[] == \"${type}\"] | any")" != "true" ]; then
+              echo "::error file=helm/templates/networkpolicy.yaml::policyTypes omits ${type};" \
+                   "a type left out of the list is not restricted at all"
+              exit 1
+            fi
+          done
+          echo "ok: both directions are policed"
+
+          # The kubelet's probes are the pod's only ingress, and they are
+          # allowed by port name so watcher.healthPort moves both ends at once.
+          # A numeric port here, or no ingress rule at all, is a pod that fails
+          # its own liveness probe and restarts forever.
+          if [ "$(printf '%s' "${policy}" | yq '.spec.ingress | length')" != "1" ] ||
+             [ "$(printf '%s' "${policy}" | yq '.spec.ingress[0].ports[0].port')" != "health" ]; then
+            echo "::error file=helm/templates/networkpolicy.yaml::ingress does not allow exactly the" \
+                 "named 'health' port. A blocked probe is indistinguishable from a dead agent:" \
+                 "the kubelet restarts the pod in a loop."
+            exit 1
+          fi
+          echo "ok: the health probes are let in, by name"
+
+          # DNS and 443 are what every install needs; 6443 is what the
+          # in-cluster API endpoint turns into after DNAT on most CNIs.
+          for port in 53 443 6443; do
+            if [ "$(printf '%s' "${policy}" | yq "[.spec.egress[].ports[].port == ${port}] | any")" != "true" ]; then
+              echo "::error file=helm/templates/networkpolicy.yaml::the default egress rules do not" \
+                   "allow port ${port}; the agent would lose DNS, its uploads, or the API server"
+              exit 1
+            fi
+          done
+          echo "ok: the default egress covers DNS, HTTPS and the API server"
+
+          # The metadata endpoint is where workload identity mints the pod's
+          # registry credentials — and it is a link-local address no install
+          # without workload identity has any reason to reach.
+          if printf '%s' "${policy}" | grep -q "169.254.169.254"; then
+            echo "::error file=helm/templates/networkpolicy.yaml::the default policy allows egress to" \
+                 "the cloud metadata endpoint; it belongs only in the workload identity case"
+            exit 1
+          fi
+          out=$(helm template stackradar-scanner helm/ --namespace stackradar \
+                --set stackradar.existingSecret=my-secret \
+                --set networkPolicy.enabled=true \
+                --set-string 'serviceAccount.annotations.iam\.gke\.io/gcp-service-account=scanner@example.iam.gserviceaccount.com')
+          if ! printf '%s' "${out}" | grep -q "169.254.169.254/32"; then
+            echo "::error file=helm/templates/networkpolicy.yaml::workload identity is configured but the" \
+                 "policy does not allow the metadata endpoint; the token exchange goes through it," \
+                 "so registry pulls would fail with a policy that looks correct"
+            exit 1
+          fi
+          echo "ok: the metadata endpoint is allowed only where it is used"
+
+          # A customer's own list replaces the defaults rather than adding to
+          # them: narrowing the 443 rule is pointless if the wide-open one is
+          # still underneath it.
+          out=$(helm template stackradar-scanner helm/ --namespace stackradar \
+                --set stackradar.existingSecret=my-secret \
+                --set networkPolicy.enabled=true \
+                --set 'networkPolicy.egress[0].to[0].ipBlock.cidr=10.0.0.0/8' \
+                --set 'networkPolicy.egress[0].ports[0].port=443')
+          policy=$(printf '%s' "${out}" | yq 'select(.kind == "NetworkPolicy")')
+          if [ "$(printf '%s' "${policy}" | yq '.spec.egress | length')" != "1" ]; then
+            echo "::error file=helm/templates/networkpolicy.yaml::a user-supplied egress list was merged" \
+                 "with the defaults instead of replacing them; a narrowed rule would sit under a" \
+                 "wide-open one and change nothing"
+            exit 1
+          fi
+          echo "ok: a supplied egress list replaces the defaults"
+
+          # No pod, no policy. The chart's render-nothing mode has to stay
+          # render-nothing.
+          out=$(helm template stackradar-scanner helm/ --namespace stackradar \
+                --set stackradar.existingSecret=my-secret \
+                --set networkPolicy.enabled=true --set watcher.enabled=false)
+          if printf '%s' "${out}" | grep -q "kind: NetworkPolicy"; then
+            echo "::error file=helm/templates/networkpolicy.yaml::watcher.enabled=false renders no pod" \
+                 "but still renders a policy, which would select nothing"
+            exit 1
+          fi
+          echo "ok: no policy without a pod to police"
+
+      # The guards below only protect users if they actually reject bad input,
+      # and a guard that silently stops firing is worse than none. Each case
+      # asserts a specific failure, not just "some error happened".
+      - name: Assert the chart rejects input it should reject
+        run: |
+          set -euo pipefail
+
+          # $1 = human description, $2 = extended regex the error must match,
+          # rest = helm args that must fail.
+          refute() {
+            local what="$1" expect="$2"; shift 2
+            local out
+            if out=$(helm template stackradar-scanner helm/ --namespace stackradar "$@" 2>&1); then
+              echo "::error::${what}: accepted, expected a failure"
+              exit 1
+            fi
+            if ! printf '%s' "${out}" | grep -qE "${expect}"; then
+              echo "::error::${what}: failed for the wrong reason, expected to see '${expect}'"
+              printf '%s\n' "${out}"
+              exit 1
+            fi
+            echo "ok: ${what}"
+          }
+
+          # Bad values.
+          refute "invalid image.digest" "values don't meet the specifications" \
+            --set stackradar.existingSecret=my-secret \
+            --set image.digest=not-a-digest
+
+          # Bad key names. Without additionalProperties these were accepted and
+          # silently discarded, which is how a dead `scanner.schedule` key
+          # survived in the gitops values for months.
+          #
+          # Helm 3.19 swapped its JSON Schema validator (xeipuuv/gojsonschema ->
+          # santhosh-tekuri/jsonschema), which reworded every schema error:
+          #   <=3.18: - scanner: Additional property schedule is not allowed
+          #   >=3.19: - at '/scanner': additional properties 'schedule' not allowed
+          # CI pins one Helm (see HELM_VERSION), but the chart supports Helm
+          # 3.8+ as well, and this step is worth running locally against
+          # whatever Helm you have — so the patterns match either wording. What
+          # is being asserted is unchanged: the rejection names the offending
+          # key, and for the nested case the object it sits under.
+          refute "unknown nested key" "scanner'?:.*[Aa]dditional propert(y|ies) '?schedule'? (is )?not allowed" \
+            --set stackradar.existingSecret=my-secret \
+            --set scanner.schedule="0 */6 * * *"
+
+          refute "unknown top-level key" "[Aa]dditional propert(y|ies) '?totallyBogus'? (is )?not allowed" \
+            --set stackradar.existingSecret=my-secret \
+            --set totallyBogus=1
+
+          # A pull secret allowlist is only worth having if the schema keeps it
+          # a list of names. The two validators word type errors differently
+          # (see above), so the pattern asserts the key and `string` rather
+          # than one validator's phrasing.
+          refute "non-string imagePullSecretNames entry" "imagePullSecretNames.*string" \
+            --set stackradar.existingSecret=my-secret \
+            --set 'scanner.imagePullSecretNames={1,2}'
+
+          # The exclusion list is one string of patterns, and a bare `--set` of
+          # something digit-shaped reaches the schema as a number. Rejecting it
+          # by name beats an install where the env var never renders.
+          refute "non-string scanner.excludeImages" "excludeImages.*string" \
+            --set stackradar.existingSecret=my-secret \
+            --set scanner.excludeImages=1
+
+          # A proxy URL with no scheme is the mistake people actually make, and
+          # `format: uri` would accept it — hence the pattern in the schema.
+          # Nothing downstream agrees on what a scheme-less proxy means, so the
+          # install has to fail rather than half-work.
+          refute "proxy URL without a scheme" "proxy.httpsProxy.*pattern" \
+            --set stackradar.existingSecret=my-secret \
+            --set proxy.httpsProxy=proxy.corp:8080
+
+          # Two sources for one bundle is ambiguous, and picking one silently
+          # means a CA that never reaches the pod.
+          refute "caBundle from both a ConfigMap and a Secret" "both set" \
+            --set stackradar.existingSecret=my-secret \
+            --set caBundle.configMapName=corp-ca \
+            --set caBundle.secretName=corp-ca
+
+          # An empty key would render an item with no key, which the API server
+          # rejects far from where the mistake was made.
+          refute "caBundle.key emptied" "caBundle.key is empty" \
+            --set stackradar.existingSecret=my-secret \
+            --set caBundle.configMapName=corp-ca \
+            --set caBundle.key=
+
+          # Annotations on a ServiceAccount the chart does not create land
+          # nowhere, and workload identity is exactly what they are for — a
+          # silently ignored role ARN is a pod with no cloud credentials and
+          # nothing in the render to say why.
+          refute "serviceAccount.annotations with serviceAccount.create=false" "renders no ServiceAccount" \
+            --set stackradar.existingSecret=my-secret \
+            --set serviceAccount.create=false \
+            --set-string 'serviceAccount.annotations.eks\.amazonaws\.com/role-arn=arn:aws:iam::123456789012:role/StackRadarScanner'
+
+          # Label and annotation values are strings to Kubernetes. `--set` (not
+          # `--set-string`) on Azure's `use: "true"` is the mistake people
+          # actually make, and it has to name the key rather than fail later in
+          # the API server.
+          refute "non-string podLabels value" "podLabels.*string" \
+            --set stackradar.existingSecret=my-secret \
+            --set podLabels.tier=1
+
+          refute "non-string podAnnotations value" "podAnnotations.*string" \
+            --set stackradar.existingSecret=my-secret \
+            --set podAnnotations.replicas=3
+
+          # A health port the pod cannot bind is a pod that fails its own
+          # liveness probe and restarts forever — diagnosed as "the probe is
+          # broken" rather than as the typo it is. Both ends of the range are
+          # real mistakes: 0 has the kernel pick a port the probes do not know,
+          # and anything under 1024 cannot be bound by a container that drops
+          # every capability.
+          refute "privileged watcher.healthPort" "healthPort.*[Dd]oes not match pattern" \
+            --set stackradar.existingSecret=my-secret \
+            --set-string watcher.healthPort=80
+
+          refute "watcher.healthPort of 0" "healthPort.*[Dd]oes not match pattern" \
+            --set stackradar.existingSecret=my-secret \
+            --set-string watcher.healthPort=0
+
+          # Egress rules with the policy switched off land nowhere, and the
+          # whole value of the object is that it is checkable — a list that
+          # silently did not render is the opposite of that.
+          refute "networkPolicy.egress with networkPolicy.enabled=false" "renders no NetworkPolicy" \
+            --set stackradar.existingSecret=my-secret \
+            --set networkPolicy.enabled=false \
+            --set 'networkPolicy.egress[0].ports[0].port=443'
+
+          # The rules are a list of NetworkPolicy egress entries. A scalar here
+          # renders a policy the API server rejects, far from the mistake.
+          refute "non-list networkPolicy.egress" "networkPolicy.egress.*array" \
+            --set stackradar.existingSecret=my-secret \
+            --set networkPolicy.egress=443
+
+          # Overriding the tag while a digest is still pinned runs the digest's
+          # image under the wrong label. Must be loud.
+          refute "image.tag overridden with image.digest still set" "clear the digest as well" \
+            --set stackradar.existingSecret=my-secret \
+            --set image.tag=1.3.0 \
+            --set image.digest=sha256:0000000000000000000000000000000000000000000000000000000000000000
+
+      # helm/README.md is generated from README.md.gotmpl and values.yaml. Nothing
+      # else notices when an edit to values.yaml ships with a stale values table,
+      # and that table is the configuration reference customers read.
+      #
+      # The binary is downloaded and checksum-verified rather than installed by a
+      # third-party action: the same argument the Dockerfile makes for syft.
+      - name: Check helm/README.md is up to date
+        env:
+          # renovate: datasource=github-releases depName=norwoodj/helm-docs
+          HELM_DOCS_VERSION: 1.14.2
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp -d)"
+          base="https://github.com/norwoodj/helm-docs/releases/download/v${HELM_DOCS_VERSION}"
+          tarball="helm-docs_${HELM_DOCS_VERSION}_Linux_x86_64.tar.gz"
+
+          curl -sSfL -o "${tmp}/${tarball}"      "${base}/${tarball}"
+          curl -sSfL -o "${tmp}/checksums.txt"   "${base}/checksums.txt"
+          (cd "${tmp}" && grep " ${tarball}\$" checksums.txt | sha256sum -c -)
+          tar -xzf "${tmp}/${tarball}" -C "${tmp}" helm-docs
+
+          "${tmp}/helm-docs" --chart-search-root=helm --template-files=README.md.gotmpl
+
+          if ! git diff --exit-code -- helm/README.md; then
+            echo "::error file=helm/README.md::helm/README.md is out of date." \
+                 "Run: helm-docs --chart-search-root=helm --template-files=README.md.gotmpl"
+            exit 1
+          fi
+
+  image:
+    name: Build image
+    runs-on: ubuntu-latest
+    needs: test
+    permissions:
+      contents: read
+      packages: write
+      id-token: write # cosign keyless signing via GitHub Actions OIDC
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
+        with:
+          images: ${{ env.IMAGE }}
+          # Deliberately no semver tags here — those belong to release.yaml.
+          tags: |
+            type=ref,event=pr
+            type=raw,value=main,enable={{is_default_branch}}
+            type=sha,prefix=sha-,format=short
+          labels: |
+            org.opencontainers.image.title=stackradar-scanner
+            org.opencontainers.image.version=0.0.0-dev+${{ github.sha }}
+            org.opencontainers.image.licenses=PolyForm-Shield-1.0.0
+
+      - name: Build and push image
+        id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: .
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: true
+          sbom: true
+
+      - name: Install Cosign
+        if: github.event_name != 'pull_request'
+        uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5 # v3.10.1
+      # a customer does, so a signature problem shows up before it ships.
+      - name: Sign image with Cosign (keyless)
+        if: github.event_name != 'pull_request'
+        run: cosign sign --yes "${IMAGE}@${DIGEST}"
+        env:
+          IMAGE: ${{ env.IMAGE }}
+          DIGEST: ${{ steps.build.outputs.digest }}

@@ -1,0 +1,7 @@
+node_modules/
+dist/
+__pycache__/
+
+# Private planning material (competitive notes, internal cluster IDs, links
+# into private repos). Lives in the private stackradar repo, never here.
+docs/proposals/
