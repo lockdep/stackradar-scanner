@@ -1,0 +1,820 @@
+name: Release
+
+# Publishes an immutable, cosigned release of the scanner image and its Helm
+# chart. The git tag is the single source of truth for the version: `v1.2.3`
+# produces image `1.2.3` and chart `1.2.3` with appVersion `1.2.3`. Nothing in
+# the repository needs to be version-bumped by hand — see RELEASING.md.
+#
+# Tags are normally created by the Cut release workflow rather than by hand.
+#
+# Once published, the version is advertised to users: the `advertise` job bumps
+# SCANNER_CHART_VERSION in both gitops repos so the app's install dialog and
+# the docs pin the new release (pushed to development, PR'd to production).
+
+on:
+  push:
+    tags:
+      - "v*"
+  # cut-release.yaml pushes its tag with GITHUB_TOKEN, and a push made with that
+  # token raises no push event, so it starts this workflow explicitly instead.
+  # Dispatch it the same way — on a tag ref, never a branch — to retry a release
+  # whose tag already exists.
+  workflow_dispatch:
+
+env:
+  IMAGE: ghcr.io/lockdep/stackradar-scanner
+  CHART_REPO: ghcr.io/lockdep/charts
+  CHART_NAME: stackradar-scanner
+  # Helm is pinned rather than floating: `latest` silently moved onto Helm 4,
+  # which reworded the schema errors the chart's guards assert on. One pinned
+  # version is what the chart is tested against; Renovate bumps it (see
+  # .github/renovate.json5) so a new Helm arrives as a reviewable PR.
+  # renovate: datasource=github-releases depName=helm/helm
+  HELM_VERSION: 4.2.3
+
+permissions:
+  contents: read
+
+# Releases must never be cancelled halfway: a run that pushed the image but not
+# the chart leaves a version half-published, and the immutability guard would
+# then block the retry.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Verify
+    runs-on: ubuntu-latest
+    steps:
+      # The tag is the version. Dispatched on a branch there is nothing to
+      # release, and every step below would derive the wrong one — fail in
+      # seconds rather than after a build.
+      - name: Refuse to run off a tag
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        run: |
+          echo "::error::Release must run on a tag, but was dispatched on ${GITHUB_REF}. Use the Cut release workflow to make one."
+          exit 1
+
+      - name: Checkout repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0 — pnpm version comes from packageManager in package.json
+
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck and build
+        run: pnpm run build
+
+      - name: Run tests
+        run: pnpm test
+
+  release:
+    name: Publish ${{ github.ref_name }}
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the GitHub Release
+      packages: write
+      id-token: write # cosign keyless signing via GitHub Actions OIDC
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          fetch-depth: 0 # need history and prior tags to build the changelog
+
+      - name: Resolve and validate version
+        id: version
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          version="${tag#v}"
+
+          # Semver, minus build metadata: '+' is not a legal character in an OCI
+          # reference, so a `v1.2.3+build.5` tag could not be published as-is.
+          if ! printf '%s' "${version}" \
+               | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$'; then
+            echo "::error::Tag '${tag}' is not of the form v<major>.<minor>.<patch>[-prerelease]."
+            echo "::error::Build metadata ('+...') is not supported: '+' is not legal in an OCI tag."
+            exit 1
+          fi
+
+          prerelease=false
+          case "${version}" in *-*) prerelease=true ;; esac
+
+          {
+            echo "version=${version}"
+            echo "prerelease=${prerelease}"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "Releasing ${version} (prerelease=${prerelease})"
+
+      # The GitHub Release and the chart's ArtifactHub entry are both built from
+      # the CHANGELOG.md section for this version, so the wording users read is
+      # written by hand and reviewed like anything else. A version with no
+      # section falls back to the tag's commit subjects: worth a warning, not
+      # worth failing a release over.
+      - name: Extract changelog section
+        id: changelog
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          # A prerelease has no section of its own: `v1.2.3-rc.1` is a rehearsal
+          # for 1.2.3 and should carry the notes 1.2.3 will ship with.
+          candidates="${VERSION}"
+          case "${VERSION}" in *-*) candidates="${VERSION} ${VERSION%%-*}" ;; esac
+
+          section=""
+          for candidate in ${candidates}; do
+            if python3 .github/scripts/changelog.py "${candidate}" \
+                 --notes "${RUNNER_TEMP}/changelog-notes.md" \
+                 --changes "${RUNNER_TEMP}/changelog-changes.yaml"; then
+              section="${candidate}"
+              break
+            else
+              status=$?
+              # 3 is "no section for this version"; anything else is a real error.
+              [ "${status}" -eq 3 ] || exit "${status}"
+            fi
+          done
+
+          if [ -n "${section}" ]; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+            echo "--- CHANGELOG.md section for ${section} ---"
+            cat "${RUNNER_TEMP}/changelog-notes.md"
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::CHANGELOG.md has no entries for ${VERSION}. The release notes and artifacthub.io/changes fall back to commit subjects."
+          fi
+
+      - name: Set up Helm
+        uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4.3.1
+        with:
+          version: v${{ env.HELM_VERSION }}
+
+      - name: Create kind cluster
+        uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0
+        with:
+          cluster_name: smoke
+          wait: 120s
+
+      # arm64 is built through QEMU. Graviton nodes and Apple-silicon kind
+      # clusters are common enough that an amd64-only image fails with
+      # `exec format error` for a real share of first installs.
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # A published version is a promise about specific bytes. Overwriting one
+      # would silently invalidate every cosign signature and digest a user has
+      # already recorded, so re-running a release for an existing version is an
+      # error rather than an update.
+      - name: Refuse to overwrite a published version
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          conflict=0
+
+          if docker buildx imagetools inspect "${IMAGE}:${VERSION}" >/dev/null 2>&1; then
+            echo "::error::${IMAGE}:${VERSION} is already published. Released versions are immutable."
+            conflict=1
+          fi
+
+          if helm show chart "oci://${CHART_REPO}/${CHART_NAME}" --version "${VERSION}" >/dev/null 2>&1; then
+            echo "::error::oci://${CHART_REPO}/${CHART_NAME}:${VERSION} is already published. Released versions are immutable."
+            conflict=1
+          fi
+
+          if [ "${conflict}" -ne 0 ]; then
+            echo "::error::To ship a change, delete the tag and cut the next version instead of reusing this one."
+            exit 1
+          fi
+
+      # Must happen before the build: package.json ships inside the runtime image,
+      # so this is the version syft reports for the agent itself when a customer
+      # scans it.
+      - name: Stamp application version
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          npm pkg set version="${VERSION}"
+          test "$(npm pkg get version | tr -d '"')" = "${VERSION}"
+
+      - name: Extract image metadata
+        id: meta
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
+        with:
+          images: ${{ env.IMAGE }}
+          # `latest` and the rolling {{major}}.{{minor}} alias are for stable
+          # releases only — a prerelease must never become what `helm install`
+          # or `docker pull` resolves to by default.
+          flavor: |
+            latest=${{ steps.version.outputs.prerelease == 'false' }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+          labels: |
+            org.opencontainers.image.title=stackradar-scanner
+            org.opencontainers.image.version=${{ steps.version.outputs.version }}
+            org.opencontainers.image.licenses=PolyForm-Shield-1.0.0
+
+      # The native-arch image is built and loaded first so it can be run
+      # before anything is pushed. A published version is immutable, so a
+      # smoke failure must happen while the version is still unburnt.
+      - name: Build image for smoke test
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: .
+          load: true
+          tags: ${{ env.IMAGE }}:smoke
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Runs the image the way the chart does — uid 65534, read-only root,
+      # every capability dropped, a writable /tmp — and proves the two
+      # binaries it ships actually execute there. syft must emit the spec
+      # version the control plane accepts; the agent must load and refuse to
+      # start without its config rather than crash somewhere less legible.
+      - name: Smoke test image
+        run: |
+          set -euo pipefail
+          run() {
+            docker run --rm --user 65534:65534 --read-only --cap-drop ALL \
+              --security-opt no-new-privileges --tmpfs /tmp "$@"
+          }
+          run "${IMAGE}:smoke" syft version
+
+          # Exit 1 with the config error, not a stack trace.
+          if out="$(run "${IMAGE}:smoke" 2>&1)"; then
+            echo "::error::agent started without STACKRADAR_API_URL/STACKRADAR_API_KEY"; exit 1
+          fi
+          printf '%s\n' "${out}" | grep -q "STACKRADAR_API_URL and STACKRADAR_API_KEY are required" \
+            || { echo "::error::unexpected startup output:"; printf '%s\n' "${out}"; exit 1; }
+
+          # The invocation the agent makes, against a tiny public image, must
+          # produce the spec version the control plane validates against.
+          run "${IMAGE}:smoke" sh -c \
+            'syft registry:docker.io/library/busybox:1.36 -o cyclonedx-json@1.6=/tmp/out.json --quiet && cat /tmp/out.json' \
+            | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["specVersion"]=="1.6", d["specVersion"]; print("syft emitted CycloneDX", d["specVersion"], "with", len(d.get("components",[])), "components")'
+          echo "Image smoke test passed."
+
+      - name: Build and push image
+        id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: mode=max
+          sbom: true
+
+      # The attestations BuildKit produced live in the image index, not as
+      # cosign `.att` artifacts — so they are checked with the tool that can
+      # read them, and that is the command the docs hand to users.
+      - name: Verify attestations and platforms
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          ref="${IMAGE}@${DIGEST}"
+          for platform in linux/amd64 linux/arm64; do
+            docker buildx imagetools inspect "${ref}" --format '{{json .Manifest}}' \
+              | python3 -c "import json,sys; m=json.load(sys.stdin); ps={p['platform']['os']+'/'+p['platform']['architecture'] for p in m['manifests'] if 'platform' in p}; sys.exit(0 if '${platform}' in ps else 1)" \
+              || { echo "::error::${ref} has no ${platform} manifest"; exit 1; }
+          done
+          docker buildx imagetools inspect "${ref}" --format '{{json .Provenance}}' \
+            | python3 -c 'import json,sys; d=json.load(sys.stdin); assert any("SLSA" in json.dumps(v) for v in d.values()), "no SLSA provenance"'
+          docker buildx imagetools inspect "${ref}" --format '{{json .SBOM}}' \
+            | python3 -c 'import json,sys; d=json.load(sys.stdin); assert any("SPDX" in json.dumps(v) for v in d.values()), "no SBOM attestation"'
+          echo "Provenance and SBOM attestations present for amd64 and arm64."
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5 # v3.10.1
+      # this tag, so there is no signing key to store, rotate, or leak.
+      - name: Sign image with Cosign (keyless)
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: cosign sign --yes "${IMAGE}@${DIGEST}"
+
+      # Stamping the chart from the tag is what keeps chart version, appVersion,
+      # the image it deploys, and the version the agent reports over
+      # `X-Scanner-Version` from ever drifting apart.
+      - name: Stamp chart metadata from the release tag
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          CHANGELOG_FOUND: ${{ steps.changelog.outputs.found }}
+        run: |
+          set -euo pipefail
+
+          yq -i '
+            .version = strenv(VERSION)
+            | .appVersion = strenv(VERSION) | .appVersion style="double"
+          ' helm/Chart.yaml
+
+          IMAGES="$(printf -- '- name: stackradar-scanner\n  image: %s:%s\n' \
+                    "${IMAGE}" "${VERSION}")"
+          export IMAGES
+          yq -i '.annotations."artifacthub.io/images" = strenv(IMAGES)' helm/Chart.yaml
+
+          # Artifact Hub's prerelease flag tracks semver, not the tag's
+          # `-rc` suffix alone: anything below 1.0.0 is a prerelease too.
+          case "${VERSION}" in
+            0.*|*-*) PRERELEASE_FLAG=true ;;
+            *)       PRERELEASE_FLAG=false ;;
+          esac
+          export PRERELEASE_FLAG
+          yq -i '.annotations."artifacthub.io/prerelease" = strenv(PRERELEASE_FLAG) | .annotations."artifacthub.io/prerelease" style="double"' helm/Chart.yaml
+
+          # ArtifactHub renders this as the release's changelog entry. The
+          # CHANGELOG.md section is authoritative when there is one; commit
+          # subjects are the fallback.
+          changes="${RUNNER_TEMP}/changelog-changes.yaml"
+
+          if [ "${CHANGELOG_FOUND}" != "true" ]; then
+            prev="$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null || true)"
+            if [ -n "${prev}" ]; then
+              range="${prev}..${GITHUB_REF_NAME}"
+              echo "Changelog range: ${range}"
+            else
+              range="${GITHUB_REF_NAME}"
+              echo "No previous tag found; using full history"
+            fi
+            git log --no-merges --pretty=format:%s "${range}" > "${RUNNER_TEMP}/subjects.txt"
+
+            python3 - "${RUNNER_TEMP}/subjects.txt" > "${changes}" <<'PY'
+          import json, sys
+
+          with open(sys.argv[1]) as fh:
+              subjects = [line.strip() for line in fh if line.strip()][:50]
+          if not subjects:
+              subjects = ["Maintenance release"]
+
+          # json.dumps gives a quoted scalar that is valid YAML, so a subject
+          # containing ':' or '#' cannot break the annotation.
+          print("\n".join(
+              f"- kind: changed\n  description: {json.dumps(s, ensure_ascii=False)}"
+              for s in subjects
+          ))
+          PY
+          fi
+
+          CHANGES="$(cat "${changes}")"
+          export CHANGES
+          yq -i '.annotations."artifacthub.io/changes" = strenv(CHANGES)' helm/Chart.yaml
+
+          # Pin the exact bytes this chart was built against. The digest is what
+          # actually selects the image; the tag alongside it is for legibility.
+          yq -i '
+            .image.tag = strenv(VERSION)
+            | .image.digest = strenv(DIGEST)
+          ' helm/values.yaml
+
+          echo "--- Chart.yaml ---"
+          cat helm/Chart.yaml
+
+      - name: Lint stamped chart
+        run: helm lint helm/ --strict
+
+      - name: Package and push Helm chart
+        id: chart
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          helm package helm/ \
+            --version "${VERSION}" \
+            --app-version "${VERSION}" \
+            --destination dist/
+
+          pkg="dist/${CHART_NAME}-${VERSION}.tgz"
+          test -f "${pkg}"
+
+          # helm push reports "Pushed:" and "Digest:" on stderr.
+          helm push "${pkg}" "oci://${CHART_REPO}" 2>&1 | tee "${RUNNER_TEMP}/push.log"
+          digest="$(awk '/^Digest: /{print $2}' "${RUNNER_TEMP}/push.log")"
+          if [ -z "${digest}" ]; then
+            echo "::error::could not parse chart digest from helm push output"
+            exit 1
+          fi
+
+          {
+            echo "digest=${digest}"
+            echo "package=${pkg}"
+          } >> "$GITHUB_OUTPUT"
+
+      # Same OIDC identity as the image, so the chart and the image it deploys
+      # share one provenance chain.
+      - name: Sign chart with Cosign (keyless)
+        env:
+          CHART_DIGEST: ${{ steps.chart.outputs.digest }}
+        run: cosign sign --yes "${CHART_REPO}/${CHART_NAME}@${CHART_DIGEST}"
+
+      # Verify with the same command the docs hand to users. A signature that
+      # does not verify should fail the release, not surprise someone later.
+      - name: Verify signatures
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          CHART_DIGEST: ${{ steps.chart.outputs.digest }}
+        run: |
+          set -euo pipefail
+          identity="^https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yaml@refs/tags/"
+          for ref in "${IMAGE}@${DIGEST}" "${CHART_REPO}/${CHART_NAME}@${CHART_DIGEST}"; do
+            echo "Verifying ${ref}"
+            cosign verify \
+              --certificate-identity-regexp "${identity}" \
+              --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+              "${ref}" > /dev/null
+          done
+          echo "Both signatures verified."
+
+      # The chart has never been installed by the time it is pushed: every
+      # invariant so far is about the rendered YAML. This installs the exact
+      # package that was just published into a kind cluster, against a stub
+      # control plane, and waits for the pod to pass its own readiness probe
+      # — the first moment the image, the chart and a real kubelet meet.
+      - name: Install the published chart into kind
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          PACKAGE: ${{ steps.chart.outputs.package }}
+        run: |
+          set -euo pipefail
+          # A stub API: the agent's startup heartbeat must succeed for the
+          # smoke to prove anything beyond "the process did not exit".
+          kubectl create namespace stackradar
+          kubectl -n stackradar apply -f - <<'YAML'
+          apiVersion: v1
+          kind: ConfigMap
+          metadata: { name: stub-api }
+          data:
+            default.conf: |
+              server {
+                listen 8080;
+                location /v1/heartbeat { default_type application/json; return 200 '{"ok":true}'; }
+                location / { default_type application/json; return 200 '{"exists":false}'; }
+              }
+          ---
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata: { name: stub-api }
+          spec:
+            replicas: 1
+            selector: { matchLabels: { app: stub-api } }
+            template:
+              metadata: { labels: { app: stub-api } }
+              spec:
+                containers:
+                  - name: nginx
+                    image: nginx:1.27-alpine
+                    ports: [{ containerPort: 8080 }]
+                    volumeMounts: [{ name: conf, mountPath: /etc/nginx/conf.d }]
+                volumes: [{ name: conf, configMap: { name: stub-api } }]
+          ---
+          apiVersion: v1
+          kind: Service
+          metadata: { name: stub-api }
+          spec:
+            selector: { app: stub-api }
+            ports: [{ port: 80, targetPort: 8080 }]
+          YAML
+          kubectl -n stackradar rollout status deployment/stub-api --timeout=120s
+
+          # The `restricted` profile on the namespace: the audience's
+          # admission policy, enforced rather than assumed.
+          kubectl label namespace stackradar \
+            pod-security.kubernetes.io/enforce=restricted \
+            pod-security.kubernetes.io/enforce-version=latest
+
+          helm install stackradar-scanner "${PACKAGE}" \
+            --namespace stackradar \
+            --set stackradar.apiUrl=http://stub-api.stackradar.svc \
+            --set stackradar.clusterId=00000000-0000-0000-0000-000000000000 \
+            --set stackradar.apiKey=smoke \
+            --set networkPolicy.enabled=false \
+            --wait --timeout 5m
+
+          kubectl -n stackradar rollout status deployment/stackradar-scanner-watcher --timeout=5m
+          pod="$(kubectl -n stackradar get pod -l app.kubernetes.io/component=watcher -o jsonpath='{.items[0].metadata.name}')"
+          kubectl -n stackradar logs "${pod}" | grep -q '"heartbeat ok"' \
+            || { echo "::error::agent never completed a heartbeat"; kubectl -n stackradar logs "${pod}"; exit 1; }
+          kubectl -n stackradar exec deploy/stub-api -- wget -qO- "http://$(kubectl -n stackradar get pod "${pod}" -o jsonpath='{.status.podIP}'):8081/readyz" \
+            | grep -q '"status": "ok"' || { echo "::error::/readyz is not ready"; exit 1; }
+
+          # A rollout must terminate the pod inside its grace period: the
+          # SIGTERM handler, not the kubelet's SIGKILL, is what ends it.
+          start=$(date +%s)
+          kubectl -n stackradar delete pod "${pod}" --wait=true --timeout=60s
+          elapsed=$(( $(date +%s) - start ))
+          if [ "${elapsed}" -ge 30 ]; then
+            echo "::error::pod took ${elapsed}s to stop — SIGTERM is not being handled"; exit 1
+          fi
+          echo "Chart ${VERSION} installed, became Ready and stopped in ${elapsed}s."
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
+          PRERELEASE: ${{ steps.version.outputs.prerelease }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          CHART_DIGEST: ${{ steps.chart.outputs.digest }}
+          PACKAGE: ${{ steps.chart.outputs.package }}
+          CHANGELOG_FOUND: ${{ steps.changelog.outputs.found }}
+        run: |
+          set -euo pipefail
+          notes="${RUNNER_TEMP}/notes.md"
+          : > "${notes}"
+
+          # What changed comes first: it is the only part of these notes that
+          # someone deciding whether to upgrade actually needs.
+          if [ "${CHANGELOG_FOUND}" = "true" ]; then
+            {
+              echo "## What changed"
+              echo
+              cat "${RUNNER_TEMP}/changelog-notes.md"
+              echo
+            } >> "${notes}"
+          fi
+
+          cat >> "${notes}" <<EOF
+          ## Install
+
+          \`\`\`bash
+          helm install stackradar-scanner oci://${CHART_REPO}/${CHART_NAME} \\
+            --version ${VERSION} \\
+            --namespace stackradar --create-namespace
+          \`\`\`
+
+          ## Artifacts
+
+          | Artifact | Reference | Digest |
+          | --- | --- | --- |
+          | Image | \`${IMAGE}:${VERSION}\` | \`${DIGEST}\` |
+          | Chart | \`oci://${CHART_REPO}/${CHART_NAME}:${VERSION}\` | \`${CHART_DIGEST}\` |
+
+          ## Verify
+
+          Both artifacts are signed with [cosign](https://docs.sigstore.dev/) keyless
+          signing. No public key to distribute — the signature is bound to this
+          repository's release workflow at tag \`${GITHUB_REF_NAME}\`.
+
+          \`\`\`bash
+          cosign verify \\
+            --certificate-identity-regexp "^https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yaml@refs/tags/" \\
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \\
+            ${IMAGE}@${DIGEST}
+
+          cosign verify \\
+            --certificate-identity-regexp "^https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yaml@refs/tags/" \\
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \\
+            ${CHART_REPO}/${CHART_NAME}@${CHART_DIGEST}
+          \`\`\`
+
+          The image is built for \`linux/amd64\` and \`linux/arm64\`, and carries
+          SLSA provenance and an SBOM attestation in its index (BuildKit
+          attestations, readable with \`imagetools\`):
+
+          \`\`\`bash
+          docker buildx imagetools inspect ${IMAGE}@${DIGEST} --format '{{json .Provenance}}'
+          docker buildx imagetools inspect ${IMAGE}@${DIGEST} --format '{{json .SBOM}}'
+          \`\`\`
+          EOF
+
+          args=(--title "${GITHUB_REF_NAME}" --notes-file "${notes}" --generate-notes)
+          if [ "${PRERELEASE}" = "true" ]; then
+            args+=(--prerelease)
+          fi
+
+          gh release create "${GITHUB_REF_NAME}" "${args[@]}" "${PACKAGE}"
+
+  # The app's "Install the chart" dialog and the landing page's quick-start
+  # both render `--version <SCANNER_CHART_VERSION>` from their ConfigMaps, so
+  # a release is not finished until the gitops repos advertise it. This job
+  # rewrites that one key in both repos: a direct push to development (the
+  # same convention build-push-app uses for image pins) and a PR to production,
+  # so what the public docs advertise still goes through a review.
+  #
+  # Prereleases are skipped on purpose: a candidate must never become the
+  # version the docs tell a new user to install.
+  #
+  # Required secrets (org-level on lockdep, shared with lockdep/stackradar):
+  #   GITOPS_DEVELOPMENT_TOKEN - contents:write on lockdep/stackradar-gitops-development
+  #   GITOPS_PROD_TOKEN        - contents:write and pull-requests:write on
+  #                              lockdep/stackradar-gitops
+  advertise:
+    name: Advertise ${{ github.ref_name }} in gitops
+    needs: release
+    if: ${{ !contains(github.ref_name, '-') }}
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ github.ref_name }}
+      # Every file carries the same key; the app and the docs must agree on the
+      # version they pin. The lists differ because the landing page deploys
+      # from the production repo only (moved there 2026-08-22).
+      FILES_DEVELOPMENT: apps/stack-radar/base/kustomization.yaml
+      FILES_PRODUCTION: apps/stack-radar/base/kustomization.yaml apps/landing-page/base/kustomization.yaml
+
+    steps:
+      - name: Checkout development gitops
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          repository: lockdep/stackradar-gitops-development
+          token: ${{ secrets.GITOPS_DEVELOPMENT_TOKEN }}
+          path: gitops-development
+
+      - name: Checkout production gitops
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          repository: lockdep/stackradar-gitops
+          token: ${{ secrets.GITOPS_PROD_TOKEN }}
+          path: gitops-production
+
+      - name: Configure git identity
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      # One exact-line rewrite per file, checked afterwards: a silently
+      # unmatched pattern would "succeed" while leaving the docs on the old
+      # version, which is the failure this job exists to prevent.
+      - name: Bump SCANNER_CHART_VERSION in both repos
+        run: |
+          set -euo pipefail
+          version="${VERSION#v}"
+          for repo in gitops-development gitops-production; do
+            if [ "${repo}" = "gitops-development" ]; then
+              read -ra files <<< "${FILES_DEVELOPMENT}"
+            else
+              read -ra files <<< "${FILES_PRODUCTION}"
+            fi
+            for file in "${files[@]}"; do
+              path="${repo}/${file}"
+              sed -i -E "s/^([[:space:]]*- SCANNER_CHART_VERSION=).*$/\1${version}/" "${path}"
+              got="$(sed -nE 's/^[[:space:]]*- SCANNER_CHART_VERSION=(.*)$/\1/p' "${path}")"
+              if [ "${got}" != "${version}" ]; then
+                echo "::error::${path}: expected exactly one SCANNER_CHART_VERSION line set to ${version}, read back '${got}'."
+                exit 1
+              fi
+              echo "${path}: SCANNER_CHART_VERSION=${version}"
+            done
+          done
+
+      - name: Render the overlays to prove they still build
+        run: |
+          set -euo pipefail
+          for overlay in \
+            gitops-development/apps/stack-radar/overlays/development \
+            gitops-production/apps/stack-radar/overlays/production \
+            gitops-production/apps/landing-page/overlays/production; do
+            kubectl kustomize "${overlay}" > /dev/null
+            echo "${overlay}: ok"
+          done
+
+      - name: Push to development
+        working-directory: gitops-development
+        run: |
+          set -euo pipefail
+          version="${VERSION#v}"
+          read -ra files <<< "${FILES_DEVELOPMENT}"
+          git add -- "${files[@]}"
+          if git diff --staged --quiet; then
+            echo "Development already advertises ${version}; nothing to push."
+            exit 0
+          fi
+          git commit -m "scanner: advertise chart ${version}"
+          git push
+
+      - name: Open production PR
+        working-directory: gitops-production
+        env:
+          GH_TOKEN: ${{ secrets.GITOPS_PROD_TOKEN }}
+        run: |
+          set -euo pipefail
+          version="${VERSION#v}"
+          branch="scanner-chart/${version}"
+
+          read -ra files <<< "${FILES_PRODUCTION}"
+          git add -- "${files[@]}"
+          if git diff --staged --quiet; then
+            echo "Production already advertises ${version}; nothing to propose."
+            exit 0
+          fi
+
+          # A re-run of this release (the tag is immutable, so the version is
+          # too) must not fail on its own earlier branch: replace it and reuse
+          # the PR if one is still open.
+          git checkout -b "${branch}"
+          git commit -m "scanner: advertise chart ${version}"
+          git push --force origin "${branch}"
+
+          existing="$(gh pr list --repo lockdep/stackradar-gitops --head "${branch}" --state open --json number --jq '.[0].number // ""')"
+          if [ -n "${existing}" ]; then
+            echo "PR #${existing} already open for ${branch}; branch updated."
+            exit 0
+          fi
+
+          gh pr create \
+            --repo lockdep/stackradar-gitops \
+            --base main \
+            --head "${branch}" \
+            --title "Advertise scanner chart ${version}" \
+            --body "$(cat <<EOF
+          Points the app's \"Install the chart\" command and the landing page quick-start
+          at the scanner chart just released as
+          [${VERSION}](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/tag/${VERSION}).
+
+          Changes \`SCANNER_CHART_VERSION\` in both ConfigMaps; the hashed names roll the
+          client and landing-page pods. Development was updated directly by the same
+          [release run](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}).
+          EOF
+          )"
+
+  # The README's install snippet is the third place users copy `--version`
+  # from. It lives on main rather than in a ConfigMap, so it is advertised by a
+  # commit: the same exact-line rewrite as the gitops job, pushed the way
+  # cut-release.yaml pushes the changelog. Prereleases are skipped for the same
+  # reason they are above.
+  readme:
+    name: Pin ${{ github.ref_name }} in README
+    needs: release
+    if: ${{ !contains(github.ref_name, '-') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # push the README commit to main
+    env:
+      VERSION: ${{ github.ref_name }}
+
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          ref: main
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      # Checked after the rewrite, like the gitops bump: an unmatched pattern
+      # must fail loudly rather than leave the README on the old version.
+      - name: Bump --version in the install snippet
+        run: |
+          set -euo pipefail
+          version="${VERSION#v}"
+          sed -i -E "s/^([[:space:]]+--version )[^[:space:]]+/\1${version}/" README.md
+          got="$(sed -nE 's/^[[:space:]]+--version ([^[:space:]]+).*$/\1/p' README.md)"
+          if [ "${got}" != "${version}" ]; then
+            echo "::error::README.md: expected exactly one '--version <x>' line set to ${version}, read back '${got}'."
+            exit 1
+          fi
+          echo "README.md: --version ${version}"
+
+      # A push made with GITHUB_TOKEN raises no push event, so this commit
+      # cannot start CI or re-trigger anything. If someone lands on main while
+      # the release ran, rebase once and retry rather than fail the release.
+      - name: Push to main
+        run: |
+          set -euo pipefail
+          version="${VERSION#v}"
+          git add README.md
+          if git diff --staged --quiet; then
+            echo "README already pins ${version}; nothing to push."
+            exit 0
+          fi
+          git commit -m "README: pin install snippet to ${version}"
+          for attempt in 1 2 3; do
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            echo "push rejected (attempt ${attempt}); rebasing onto main"
+            git fetch origin main
+            git rebase origin/main
+          done
+          echo "::error::could not push the README bump to main after 3 attempts."
+          exit 1

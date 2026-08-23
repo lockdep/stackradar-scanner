@@ -1,0 +1,71 @@
+apiVersion: v2
+name: stackradar-scanner
+description: >-
+  Event-driven Kubernetes scanner that watches pod changes in real time,
+  generates SBOMs with Syft, and uploads them to StackRadar for continuous
+  software supply-chain visibility.
+type: application
+
+# Placeholder. The released version is stamped in by CI from the git tag that
+# triggered the release (`v1.2.3` -> `1.2.3`), so there is nothing to bump by
+# hand here. A chart built off this file without CI is a dev build by
+# construction — never publish it.
+version: 0.0.0-dev
+appVersion: "0.0.0-dev"
+
+# The oldest control plane the chart is rendered for. `seccompProfile` on a
+# pod security context and the NetworkPolicy `endPort`-free shape used here
+# are stable from 1.19; the informer's client library targets 1.25+. The
+# `-0` suffix is what lets pre-release cluster versions (`v1.29.0-eks-…`)
+# satisfy the constraint. Stated so `helm install` refuses a cluster the agent
+# has never been run on, instead of failing later in a way that looks like
+# the agent's fault.
+kubeVersion: ">=1.25.0-0"
+
+home: https://stackradar.io
+sources:
+  - https://github.com/lockdep/stackradar-scanner
+
+keywords:
+  - sbom
+  - security
+  - supply-chain
+  - scanner
+  - syft
+  - kubernetes
+
+maintainers:
+  - name: StackRadar
+    email: support@stackradar.io
+    url: https://stackradar.io
+
+icon: https://stackradar.io/apple-icon
+
+# `artifacthub.io/changes` and the image reference under `artifacthub.io/images`
+# are rewritten by the release workflow from the tag's commit range and the
+# built image digest. The values below are dev placeholders.
+annotations:
+  artifacthub.io/category: security
+  # 0.x: the public value names are stable, but the agent has not yet been
+  # through a major release. Cleared by the release workflow for a 1.0.0 tag.
+  artifacthub.io/prerelease: "true"
+  # Source-available, not open source: use is permitted except to build or run
+  # something that competes with StackRadar. Full terms ship in the chart as
+  # LICENSE.md, as the license's Notices section requires.
+  artifacthub.io/license: PolyForm-Shield-1.0.0
+  artifacthub.io/changes: |
+    - kind: added
+      description: Development build
+  artifacthub.io/links: |
+    - name: Documentation
+      url: https://stackradar.io/docs/install
+    - name: Support
+      url: https://github.com/lockdep/stackradar-scanner/issues
+    - name: License
+      url: https://github.com/lockdep/stackradar-scanner/blob/main/LICENSE.md
+  # No `whitelisted: true`: that key opts the image *out* of Artifact Hub's
+  # vulnerability scanning, and an agent that scans other people's images
+  # should not exempt its own.
+  artifacthub.io/images: |
+    - name: stackradar-scanner
+      image: ghcr.io/lockdep/stackradar-scanner:0.0.0-dev

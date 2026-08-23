@@ -1,0 +1,161 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "required": [],
+
+  "$comment": "additionalProperties is false on every object the chart defines, so a mistyped key fails the install by name instead of being silently discarded. The free-form objects below (resources, security contexts, nodeSelector, affinity) stay open on purpose: their contents are Kubernetes' to validate, not this chart's.",
+  "additionalProperties": false,
+
+  "$defs": {
+    "$comment": "Booleans and integers accept both the native type and its string spelling. `--set scanner.resolveWorkloadOwners=false` arrives as a boolean and a values file may say \"false\"; the templates render either with `toString`, so rejecting one of them was a schema bug that the README's own commands tripped over.",
+    "boolean": {
+      "anyOf": [
+        { "type": "boolean" },
+        { "type": "string", "enum": ["true", "false"] }
+      ]
+    },
+    "nonNegativeInteger": {
+      "anyOf": [
+        { "type": "integer", "minimum": 0 },
+        { "type": "string", "pattern": "^[0-9]+$" }
+      ]
+    }
+  },
+
+  "properties": {
+    "rbac": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "create": { "type": "boolean" }
+      }
+    },
+    "stackradar": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "apiUrl":                     { "type": "string", "format": "uri" },
+        "clusterId":                  { "type": "string" },
+        "apiKey":                     { "type": "string" },
+        "existingSecret":             { "type": "string" },
+        "existingSecretKeyApiKey":    { "type": "string" },
+        "existingSecretKeyClusterId": { "type": "string" }
+      }
+    },
+    "scanner": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "excludeNamespaces":       { "type": "string" },
+        "includeNamespaces":       { "type": "string" },
+        "excludeImages":           { "type": "string" },
+        "syftTimeoutMs":           { "$ref": "#/$defs/nonNegativeInteger" },
+        "skipExistingDigests":     { "$ref": "#/$defs/boolean" },
+        "resolveImagePullSecrets": { "$ref": "#/$defs/boolean" },
+        "resolveWorkloadOwners":   { "$ref": "#/$defs/boolean" },
+        "resolveArgocdApplications": { "$ref": "#/$defs/boolean" },
+        "argocdNamespace":         { "type": "string", "minLength": 1, "maxLength": 63 },
+        "imagePullSecretNames":    { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "watcher": {
+      "type": "object",
+      "additionalProperties": false,
+
+      "$comment": "healthPort is constrained to 1024-65535 rather than to digits like the other numeric values, because both ends of that range are real: 0 would have the kernel pick a port the probes do not know about, and anything under 1024 cannot be bound by a container that drops every capability. Either mistake produces a pod that fails its own liveness probe and restarts forever, diagnosed as \"the new probe is broken\".",
+
+      "properties": {
+        "enabled":         { "type": "boolean" },
+        "sweepIntervalMs": { "$ref": "#/$defs/nonNegativeInteger" },
+        "concurrentScans": { "$ref": "#/$defs/nonNegativeInteger" },
+        "healthPort": {
+          "oneOf": [
+            { "type": "integer", "minimum": 1024, "maximum": 65535 },
+            { "type": "string", "pattern": "^(102[4-9]|10[3-9][0-9]|1[1-9][0-9]{2}|[2-9][0-9]{3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5])$" }
+          ]
+        },
+        "scratchSizeLimit": { "type": "string", "pattern": "^[0-9]+(\\.[0-9]+)?(Ki|Mi|Gi|Ti|k|M|G|T)?$" },
+        "resources":       { "type": "object" }
+      }
+    },
+    "proxy": {
+      "type": "object",
+      "additionalProperties": false,
+
+      "$comment": "A pattern rather than \"format\": \"uri\". Two reasons: the empty default is not a valid URI and would fail every install that leaves these unset, and `proxy.corp:8080` — the mistake people actually make — *is* a valid URI, so format would accept the one value that does not work. The pattern accepts empty or a scheme-qualified URL and nothing else.",
+
+      "properties": {
+        "httpProxy":  { "type": "string", "pattern": "^(https?://.+)?$" },
+        "httpsProxy": { "type": "string", "pattern": "^(https?://.+)?$" },
+        "noProxy":    { "type": "string" }
+      }
+    },
+    "caBundle": {
+      "type": "object",
+      "additionalProperties": false,
+
+      "$comment": "No minLength on `key`: an empty key with a bundle configured is caught in deployment.yaml, which can say what to do about it. The mutual exclusion of configMapName and secretName is a template guard for the same reason — JSON Schema can express it, but only as a oneOf whose failure message names neither key.",
+
+      "properties": {
+        "configMapName": { "type": "string" },
+        "secretName":    { "type": "string" },
+        "key":           { "type": "string" }
+      }
+    },
+    "networkPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+
+      "$comment": "`egress` stays an open array for the same reason as tolerations and affinity: its entries are NetworkPolicy's own `spec.egress` shape, which is the API's to validate rather than this chart's. What is worth catching here is a scalar where a list belongs — `--set networkPolicy.egress=443` renders a policy the API server rejects, far from the mistake.",
+
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "egress":  { "type": "array" }
+      }
+    },
+    "dockerConfigSecret": { "type": "string" },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository"],
+      "properties": {
+        "repository": { "type": "string" },
+        "tag":        { "type": "string" },
+        "digest":     { "type": "string", "pattern": "^(sha256:[a-f0-9]{64})?$" },
+        "pullPolicy": { "type": "string", "enum": ["Always", "IfNotPresent", "Never"] }
+      }
+    },
+    "imagePullSecrets":   { "type": "array" },
+
+    "podLabels": {
+      "type": "object",
+      "$comment": "Typed as a map of strings rather than left open like nodeSelector: Kubernetes rejects a non-string label value, and `--set podLabels.foo=1` produces exactly that. Caught here, the error names the key instead of arriving from the API server at install time.",
+      "additionalProperties": { "type": "string" }
+    },
+    "podAnnotations": {
+      "type": "object",
+      "additionalProperties": { "type": "string" }
+    },
+    "podSecurityContext": { "type": "object" },
+    "securityContext":    { "type": "object" },
+    "nodeSelector":       { "type": "object" },
+    "tolerations":        { "type": "array" },
+    "affinity":           { "type": "object" },
+    "priorityClassName":  { "type": "string" },
+    "nameOverride":       { "type": "string" },
+    "fullnameOverride":   { "type": "string" },
+    "serviceAccount": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "create":      { "type": "boolean" },
+        "name":        { "type": "string" },
+        "annotations": {
+          "type": "object",
+          "$comment": "Same reasoning as podLabels: annotation values are strings to Kubernetes, so a role ARN typo'd into a number fails here by name.",
+          "additionalProperties": { "type": "string" }
+        }
+      }
+    }
+  }
+}

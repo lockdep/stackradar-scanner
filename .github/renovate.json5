@@ -1,0 +1,72 @@
+{
+  $schema: "https://docs.renovatebot.com/renovate-schema.json",
+
+  // The agent's own SBOM is a product surface: customers scanning this image
+  // see whatever it is built from. Anything pinned here therefore needs
+  // something watching for updates, or it silently accumulates findings.
+  extends: [
+    "config:recommended",
+    ":dependencyDashboard",
+    // Third-party actions run with access to this repository's release
+    // credentials, so they are pinned by commit SHA rather than by a mutable
+    // tag. Renovate keeps the SHA current and annotates it with the version.
+    "helpers:pinGitHubActionDigests",
+  ],
+
+  // Weekly rather than continuous: batching keeps the release history readable,
+  // and nothing here is urgent enough to warrant a PR the hour it lands.
+  schedule: ["before 09:00 on monday"],
+  labels: ["dependencies"],
+
+  packageRules: [
+    {
+      // The base image is pinned by digest (see Dockerfile), so a plain tag
+      // move produces a digest-only diff. Grouping the two Dockerfile stages
+      // keeps them from ever drifting apart across separate PRs.
+      matchManagers: ["dockerfile"],
+      matchPackageNames: ["node"],
+      groupName: "node base image",
+    },
+    {
+      matchManagers: ["npm"],
+      matchDepTypes: ["devDependencies"],
+      groupName: "dev dependencies",
+    },
+    {
+      // Runtime dependencies end up in the shipped image and its SBOM, so they
+      // are reviewed one at a time rather than as a batch.
+      matchManagers: ["npm"],
+      matchDepTypes: ["dependencies"],
+      groupName: null,
+    },
+  ],
+
+  customManagers: [
+    {
+      // `ARG SYFT_VERSION=` is not a dependency the dockerfile manager can see;
+      // the `# renovate:` comment above it in the Dockerfile is what makes it
+      // one. Bumping the version is all that is needed — the build verifies the
+      // new release against its own signed checksums at build time, so there is
+      // no hash in the repository to keep in step.
+      customType: "regex",
+      managerFilePatterns: ["/(^|/)Dockerfile$/"],
+      matchStrings: [
+        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)\\s+ARG \\w+_VERSION=(?<currentValue>\\S+)",
+      ],
+      extractVersionTemplate: "^v?(?<version>.*)$",
+      versioningTemplate: "semver",
+    },
+    {
+      // Same idea for tool versions pinned as a workflow `env:` value — CI
+      // downloads those binaries and verifies them against the release's own
+      // checksums, so only the version here needs maintaining.
+      customType: "regex",
+      managerFilePatterns: ["/^\\.github/workflows/.+\\.ya?ml$/"],
+      matchStrings: [
+        "# renovate: datasource=(?<datasource>\\S+) depName=(?<depName>\\S+)\\s+\\w+_VERSION: (?<currentValue>\\S+)",
+      ],
+      extractVersionTemplate: "^v?(?<version>.*)$",
+      versioningTemplate: "semver",
+    },
+  ],
+}

@@ -1,0 +1,11 @@
+# The helm-docs source template — README.md is generated from it and is what
+# users should read. Shipping the template in the package is just noise.
+README.md.gotmpl
+
+.DS_Store
+.git/
+.gitignore
+*.tmproj
+*.swp
+*.bak
+*.tgz

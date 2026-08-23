@@ -1,0 +1,297 @@
+stackradar:
+  # -- StackRadar API endpoint. Override only when running against a self-hosted instance.
+  apiUrl: "https://api.stackradar.io"
+
+  # -- Cluster ID to identify this cluster in StackRadar. Can be passed inline at install time
+  # instead of via a Secret (avoid in day-to-day use — values land on disk and in CI logs).
+  clusterId: ""
+
+  # -- API key for StackRadar. If set, the chart creates the credentials Secret automatically.
+  apiKey: ""
+
+  # -- Name of a pre-existing Secret with keys `cluster-id` and `api-key`.
+  # When set, the chart skips Secret creation and the Deployment reads from this Secret instead.
+  # Compatible with sealed-secrets, external-secrets, and SOPS workflows.
+  existingSecret: ""
+
+  # -- Key within `existingSecret` holding the API key. Defaults to `api-key` when empty.
+  existingSecretKeyApiKey: ""
+
+  # -- Key within `existingSecret` holding the cluster ID. Defaults to `cluster-id` when empty.
+  existingSecretKeyClusterId: ""
+
+scanner:
+  # -- Comma-separated list of namespaces to exclude from scanning.
+  excludeNamespaces: "kube-system,kube-public,kube-node-lease"
+
+  # -- Comma-separated list of namespaces to scan. When set, ONLY these namespaces are scanned.
+  includeNamespaces: ""
+
+  # -- Comma-separated glob patterns for images that are never scanned, whatever
+  # namespace they run in. Matched against the image name with its tag and digest
+  # stripped, so a pattern written once keeps working as the tag moves. `*` is the
+  # only wildcard and it spans `/`; everything else is literal, and patterns match
+  # the whole name — `registry.k8s.io/*` covers `registry.k8s.io/pause:3.9` but not
+  # `myregistry.io/registry.k8s.io-mirror/app`. A pattern that carries a `:tag` or
+  # an `@sha256:...` could never match, so it is dropped with a warning at startup
+  # rather than silently doing nothing. The agent logs the patterns it ended up
+  # with when it starts — worth reading, since an over-broad one drops coverage
+  # quietly. Example: "registry.k8s.io/*,*/pause,ghcr.io/acme/vendor-*"
+  excludeImages: ""
+
+  # -- Timeout per image scan in milliseconds.
+  syftTimeoutMs: 300000
+
+  # -- Skip images whose digest is already indexed in StackRadar.
+  # Eliminates redundant syft runs when the image binary has not changed.
+  skipExistingDigests: true
+
+  # -- Resolve imagePullSecrets from workload pod specs for private registry auth.
+  # Off by default: it needs `secrets get` in the ClusterRole, and the chart
+  # refuses to grant that cluster-wide — turning this on also requires naming
+  # the pull Secrets in `scanner.imagePullSecretNames`, which becomes an RBAC
+  # `resourceNames` restriction. Leave it off if your images are public, or if
+  # you mount one static pull secret via `dockerConfigSecret`.
+  resolveImagePullSecrets: false
+
+  # -- Read the metadata of the object each pod belongs to — its Deployment,
+  # StatefulSet, DaemonSet, Job or CronJob — to recover the Helm and GitOps
+  # context the pod itself does not carry. Requires `get` on `apps` and `batch`
+  # in the ClusterRole, which this value gates.
+  #
+  # On by default because it fixes wrong data rather than adding capability:
+  # Helm writes `meta.helm.sh/release-*` onto the objects it applies and never
+  # onto the pod template inside them, and an operator that generates a
+  # StatefulSet from a custom resource writes its own labels for the pods it
+  # manages — so with pod metadata alone, chart-managed workloads are reported
+  # as unmanaged. The agent asks for `PartialObjectMetadata`, so the API server
+  # returns labels and annotations and never the workload spec, and only the
+  # same allowlist that applies to pod metadata is ever forwarded.
+  #
+  # One `get` per distinct controller per process, on the 5-minute inventory
+  # path — never on the pod watch. Denied (403) it logs one line and falls back
+  # to pod-only attribution rather than failing the report.
+  resolveWorkloadOwners: true
+
+  # -- Read ArgoCD `Application` objects for the repository URL, chart and
+  # target revision behind a GitOps-delivered workload. Requires `list` on
+  # `argoproj.io/applications` in the ClusterRole, which this value gates.
+  #
+  # Harmless on a cluster with no ArgoCD: the first list returns 404, which the
+  # agent takes as "no CRD" and never asks again. Workloads still get their
+  # delivery layer from the `argocd.argoproj.io/tracking-id` annotation without
+  # it — they simply carry no repository URL, and a chart upgrade then has no
+  # `targetRevision` to point at.
+  resolveArgocdApplications: true
+
+  # -- Namespace holding your ArgoCD `Application` objects. Only used when
+  # `scanner.resolveArgocdApplications` is "true".
+  #
+  # Also the namespace reported for an app named by a tracking annotation, since
+  # Argo's tracking ID names the app but not where it lives. With
+  # apps-in-any-namespace enabled the annotation carries `<namespace>/<app>` and
+  # that wins over this value.
+  argocdNamespace: "argocd"
+
+  # -- Names of the imagePullSecrets the scanner is allowed to read. Required
+  # when `scanner.resolveImagePullSecrets` is "true": the ClusterRole grants
+  # `secrets get` only on these names via RBAC `resourceNames`, and an empty
+  # list fails the render rather than granting every Secret in the cluster.
+  # Names match in every namespace: a Secret called `regcred` anywhere in the
+  # cluster is readable, so use distinct names if that matters to you. A Secret
+  # left off the list is not readable, and images that need it fall back to an
+  # anonymous pull — the agent logs a warning naming the Secret.
+  imagePullSecretNames: []
+
+watcher:
+  # -- Enable the event-driven watcher with periodic sweeps.
+  enabled: true
+
+  # -- How often to run a full pod sweep in milliseconds.
+  # Set to 0 to disable periodic sweeps and rely solely on the informer.
+  sweepIntervalMs: 21600000
+
+  # -- Maximum number of concurrent syft scans.
+  # Each invocation can use 300–600 MiB for large images; keeping this at 1 avoids OOM kills.
+  concurrentScans: 1
+
+  # -- Port for the agent's liveness and readiness endpoints. Not exposed by a
+  # Service — the kubelet reaches it on the pod IP and nothing else does. Change
+  # it only if something else in the pod's network namespace already listens
+  # here. Must be 1024 or above: the container drops every Linux capability, so
+  # it cannot bind a privileged port.
+  healthPort: 8081
+
+  # -- Size limit of the scratch volume mounted at `/tmp`, where syft unpacks
+  # each image's layers before cataloguing them. Without a limit one very large
+  # image fills the node's disk and the kubelet evicts *other* pods under
+  # DiskPressure; with one, the scanner pod is evicted instead and restarts with
+  # an empty volume. Set it above the compressed size of your largest image.
+  scratchSizeLimit: 4Gi
+
+  # -- Resource requests and limits for the watcher Deployment. No CPU limit is
+  # set by default — CPU is compressible, and a limit only throttles syft
+  # mid-scan on a node that has cycles to spare. Clusters that enforce
+  # LimitRanges or quotas can set one with `watcher.resources.limits.cpu`.
+  # The ephemeral-storage limit bounds `/tmp` plus container logs; keep it
+  # above `watcher.scratchSizeLimit`.
+  resources:
+    requests:
+      cpu: 50m
+      memory: 512Mi
+      ephemeral-storage: 1Gi
+    limits:
+      memory: 1Gi
+      ephemeral-storage: 6Gi
+
+proxy:
+  # -- HTTP proxy URL for outbound traffic, e.g. `http://proxy.corp:8080`. Include the
+  # scheme — a bare `proxy.corp:8080` is rejected, because tools that read these
+  # variables disagree about what a scheme-less value means.
+  httpProxy: ""
+
+  # -- HTTPS proxy URL for outbound traffic. Set this one if you set only one:
+  # the StackRadar API and most registries are reached over https.
+  httpsProxy: ""
+
+  # -- Comma-separated hosts that bypass the proxy. The in-cluster Kubernetes API
+  # (`kubernetes.default.svc`, `.svc`, `.cluster.local`, `localhost`, `127.0.0.1`)
+  # is always appended, so list only your own internal registries here.
+  noProxy: ""
+
+caBundle:
+  # -- Name of a ConfigMap holding additional CA certificates to trust, for clusters
+  # behind a TLS-intercepting proxy. The object must hold a PEM bundle under
+  # `caBundle.key`; it is mounted read-only and added to the trust store of both
+  # runtimes in the image. Mutually exclusive with `caBundle.secretName` — setting
+  # both fails the render rather than silently picking one.
+  configMapName: ""
+
+  # -- Name of a Secret holding the same thing, for workflows that keep the bundle in
+  # a Secret. A CA certificate is public by nature, so a ConfigMap is the usual home;
+  # this exists because external-secrets and SOPS pipelines deliver everything as
+  # Secrets.
+  secretName: ""
+
+  # -- Key within the ConfigMap or Secret holding the PEM bundle. Only this one key is
+  # mounted, so unrelated keys in the same object are not exposed to the pod.
+  key: "ca-certificates.crt"
+
+networkPolicy:
+  # -- Create a NetworkPolicy for the scanner pod. Ingress is denied except the
+  # health port the kubelet probes on; egress is allowed to the destinations in
+  # `networkPolicy.egress` — by default DNS, the Kubernetes API server and TCP
+  # 443 (the StackRadar API and your registries). On by default so the agent's
+  # reach is an object you can read, not a promise. Requires a CNI that
+  # enforces NetworkPolicy — with one that does not, the object is inert rather
+  # than a false sense of safety. Set to false if a registry on a non-443 port
+  # stops being scanned and you would rather not write an egress rule for it.
+  enabled: true
+
+  # -- Egress rules, written in the API's own `spec.egress` shape. Left empty,
+  # the chart renders defaults covering DNS, the Kubernetes API server, and TCP
+  # 443 to any address — the StackRadar API and your registries. A list set here
+  # replaces those defaults entirely rather than adding to them: narrow the 443
+  # rule to the CIDRs your registries live in if you know them, and keep a DNS
+  # rule of your own or nothing resolves. Behind a proxy this collapses to DNS
+  # plus the proxy's address, which is a far tighter policy than the default.
+  egress: []
+
+# -- Name of a `kubernetes.io/dockerconfigjson` Secret to mount as a docker config,
+# allowing syft to pull from private registries.
+# Create with: `kubectl create secret generic registry-credentials --from-file=.dockerconfigjson=...`
+dockerConfigSecret: ""
+
+image:
+  # -- Container image repository.
+  repository: ghcr.io/lockdep/stackradar-scanner
+
+  # -- Image tag. Defaults to the chart appVersion, which for a released chart is the
+  # release version — leave empty so the chart and the image it deploys stay in lockstep.
+  tag: ""
+
+  # -- Image digest (sha256:...). Stamped by the release workflow so every published chart
+  # pins the exact image bytes it was tested against, and set empty on dev builds.
+  # The digest wins over the tag: to run a different image you must clear this as well
+  # (`--set image.tag=X --set image.digest=""`), otherwise the tag is cosmetic.
+  digest: ""
+
+  # -- Image pull policy.
+  pullPolicy: Always
+
+# -- List of image pull secrets for the scanner pod.
+imagePullSecrets: []
+
+# -- Extra labels for the scanner pod. Azure Workload Identity is switched on
+# here, with `azure.workload.identity/use: "true"`. The chart's own labels win
+# on a collision: `app.kubernetes.io/name`, `app.kubernetes.io/instance` and
+# `app.kubernetes.io/component` are part of the Deployment's selector and are
+# immutable after creation, so a value that displaced one would break the next
+# `helm upgrade` rather than this install.
+podLabels: {}
+
+# -- Extra annotations for the scanner pod, e.g. the client ID Azure Workload
+# Identity reads (`azure.workload.identity/client-id`).
+podAnnotations: {}
+
+# -- Pod-level security context. `seccompProfile: RuntimeDefault` is what a
+# namespace enforcing the `restricted` Pod Security Standard requires; without
+# it the pod is rejected at admission.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65534
+  runAsGroup: 65534
+  fsGroup: 65534
+  seccompProfile:
+    type: RuntimeDefault
+
+# -- Container-level security context.
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+# -- Node selector for pod scheduling.
+nodeSelector: {}
+
+# -- Tolerations for pod scheduling on tainted nodes.
+tolerations: []
+
+# -- Affinity rules for fine-grained pod placement.
+affinity: {}
+
+# -- PriorityClassName so the scanner yields resources to application pods.
+priorityClassName: ""
+
+# -- Override the chart name used in resource names and labels.
+nameOverride: ""
+
+# -- Override the full name of the chart's resources, replacing the
+# `<release>-<chart>` default entirely.
+fullnameOverride: ""
+
+rbac:
+  # -- Create the ClusterRole and ClusterRoleBinding that give the
+  # ServiceAccount its read access. Independent of `serviceAccount.create`: a
+  # cluster that manages ServiceAccounts elsewhere still usually wants the
+  # chart's RBAC, and the old coupling meant `serviceAccount.create=false`
+  # silently rendered no rules and a pod that 403'd on its first list. Set to
+  # false only if you bind the documented rules yourself.
+  create: true
+
+serviceAccount:
+  # -- Create a ServiceAccount for the scanner.
+  create: true
+
+  # -- Override the ServiceAccount name. Defaults to the release name when empty.
+  name: ""
+
+  # -- Annotations for the ServiceAccount. This is where cloud workload identity
+  # is wired up — `eks.amazonaws.com/role-arn` on EKS,
+  # `iam.gke.io/gcp-service-account` on GKE — so the pod receives short-lived
+  # credentials from the cloud instead of a static `dockerConfigSecret`. Only
+  # meaningful with `serviceAccount.create: true`; setting both fails the render
+  # rather than putting the annotations nowhere.
+  annotations: {}

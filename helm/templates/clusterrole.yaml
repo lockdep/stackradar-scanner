@@ -1,0 +1,93 @@
+{{- if .Values.rbac.create }}
+{{- /*
+Cluster-scoped objects have no namespace to keep two releases apart, so the
+release namespace is part of the name: a `stackradar-scanner` release in
+`stackradar` and another in `stackradar-staging` would otherwise fight over
+one ClusterRole, each `helm upgrade` rewriting the other's rules.
+*/ -}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "stackradar-scanner.clusterRoleName" . }}
+  labels:
+    {{- include "stackradar-scanner.labels" . | nindent 4 }}
+rules:
+  # Discover running images. `watch` drives the informer; `list` backs both the
+  # informer's initial sync and the periodic sweep. This is the only rule the
+  # agent needs to scan; everything below is optional attribution, gated by
+  # the value that switches it on.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list", "watch"]
+  {{- if eq (.Values.scanner.resolveImagePullSecrets | toString) "true" }}
+  {{- /*
+  A `secrets get` rule with no resourceNames is `get` on every Secret in the
+  cluster, for an agent that only ever needs the handful named in pod specs.
+  Anything that ends up holding this ServiceAccount's token — a supply-chain
+  compromise of the image, a hole in syft, a stolen token — could then read any
+  Secret whose name it can guess. So the chart will not render that rule: the
+  names are required, and the trade-off is stated here rather than discovered
+  in an audit.
+  */ -}}
+  {{- if not .Values.scanner.imagePullSecretNames }}
+  {{- fail "scanner.resolveImagePullSecrets is true but scanner.imagePullSecretNames is empty. The chart will not grant `secrets get` on every Secret in the cluster: name the pull Secrets the scanner may read (e.g. --set 'scanner.imagePullSecretNames={regcred,ghcr-creds}'), or set scanner.resolveImagePullSecrets=false and mount one static pull secret via dockerConfigSecret." }}
+  {{- end }}
+  # Read imagePullSecrets to resolve private registry credentials per workload,
+  # narrowed to the names in `scanner.imagePullSecretNames`. resourceNames is
+  # legal here because the agent only ever `get`s a Secret by name — it never
+  # lists or watches them. Note this matches those names in every namespace:
+  # a ClusterRole has no namespace to scope them to.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
+    resourceNames:
+      {{- toYaml .Values.scanner.imagePullSecretNames | nindent 6 }}
+  {{- end }}
+  {{- if eq (.Values.scanner.resolveWorkloadOwners | toString) "true" }}
+  # Read the metadata of the object a pod belongs to.
+  #
+  # `get` only — no `list`, no `watch`, and one request per distinct controller
+  # for the life of the process. The agent asks for `PartialObjectMetadata`, so
+  # what comes back is labels and annotations; the pod spec never crosses the
+  # wire.
+  #
+  # Needed because the pod is the one object in the chain that usually does not
+  # carry chart context: Helm writes `meta.helm.sh/release-*` on the objects it
+  # applies and never on the pod template, and an operator that generates a
+  # StatefulSet from a CR writes its own labels for the pods it manages. Without
+  # this rule, chart-managed workloads are reported as unmanaged.
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets", "daemonsets", "replicasets"]
+    verbs: ["get"]
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["get"]
+  {{- end }}
+  {{- if eq (.Values.scanner.resolveArgocdApplications | toString) "true" }}
+  # Read ArgoCD Application objects for the repository URL and target revision
+  # behind a GitOps-delivered workload — the only source in the cluster for
+  # either, and for an Argo user the place a chart upgrade is actually made.
+  #
+  # `list` only, in `scanner.argocdNamespace` alone. A ClusterRole has no
+  # namespace to scope to, so the narrowing is in the agent rather than in RBAC;
+  # a cluster with no ArgoCD answers 404 once and is never asked again.
+  - apiGroups: ["argoproj.io"]
+    resources: ["applications"]
+    verbs: ["list"]
+  {{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "stackradar-scanner.clusterRoleName" . }}
+  labels:
+    {{- include "stackradar-scanner.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "stackradar-scanner.clusterRoleName" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "stackradar-scanner.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}
