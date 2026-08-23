@@ -2,10 +2,9 @@ name: CI
 
 # Continuous integration for the default branch and pull requests.
 #
-# This workflow never publishes a versioned artifact. Released images and charts
-# come exclusively from release.yaml, triggered by a `v*` tag — see RELEASING.md.
-# What main publishes is a moving `main` image tag for dogfooding and manual
-# testing; it is explicitly not something an external user should depend on.
+# This workflow publishes nothing. Released images and charts come exclusively
+# from release.yaml, triggered by a `v*` tag — see RELEASING.md. The image job
+# here only proves the Dockerfile builds.
 
 on:
   push:
@@ -16,7 +15,6 @@ on:
       - main
 
 env:
-  IMAGE: ghcr.io/lockdep/stackradar-scanner
   # Helm is pinned rather than floating: `latest` silently moved onto Helm 4,
   # which reworded the schema errors the chart's guards assert on. One pinned
   # version is what the chart is tested against; Renovate bumps it (see
@@ -867,8 +865,6 @@ jobs:
     needs: test
     permissions:
       contents: read
-      packages: write
-      id-token: write # cosign keyless signing via GitHub Actions OIDC
     steps:
       - name: Checkout repository
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
@@ -876,49 +872,17 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
 
-      - name: Log in to GHCR
-        if: github.event_name != 'pull_request'
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Extract metadata
-        id: meta
-        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
-        with:
-          images: ${{ env.IMAGE }}
-          # Deliberately no semver tags here — those belong to release.yaml.
-          tags: |
-            type=ref,event=pr
-            type=raw,value=main,enable={{is_default_branch}}
-            type=sha,prefix=sha-,format=short
-          labels: |
-            org.opencontainers.image.title=stackradar-scanner
-            org.opencontainers.image.version=0.0.0-dev+${{ github.sha }}
-            org.opencontainers.image.licenses=PolyForm-Shield-1.0.0
-
-      - name: Build and push image
-        id: build
+      # Build only. Nothing from CI is pushed to GHCR: the public package holds
+      # released versions and nothing else, so a customer browsing it sees the
+      # releases rather than hundreds of per-commit builds, and there is no
+      # moving tag for anyone to install by mistake. release.yaml builds its own
+      # image from the tag; what this job proves is that the Dockerfile still
+      # builds, and the layer cache it leaves in GHA is what makes that release
+      # build fast.
+      - name: Build image
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          push: false
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          provenance: true
-          sbom: true
-
-      - name: Install Cosign
-        if: github.event_name != 'pull_request'
-        uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5 # v3.10.1
-      # a customer does, so a signature problem shows up before it ships.
-      - name: Sign image with Cosign (keyless)
-        if: github.event_name != 'pull_request'
-        run: cosign sign --yes "${IMAGE}@${DIGEST}"
-        env:
-          IMAGE: ${{ env.IMAGE }}
-          DIGEST: ${{ steps.build.outputs.digest }}

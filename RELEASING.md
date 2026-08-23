@@ -198,9 +198,10 @@ demonstrably verifiable signatures and has actually run once.
 
 ## What main publishes
 
-Pushes to `main` publish a moving `main` tag and a `sha-<short>` tag for the
-image only — no chart, no semver tag. They are signed the same way, but they
-are dogfooding builds: nothing external should depend on them.
+Nothing. CI builds the image on every push to prove the Dockerfile still builds,
+and discards it. The GHCR package holds released versions only, so what a
+customer sees there is the list of releases — not hundreds of per-commit
+builds, and no moving tag to install by mistake.
 
 The dogfood cluster tracks released chart versions. After a release, bump
 `targetRevision` in the gitops repo's `argocd/applications/apps/scanner.yaml`
