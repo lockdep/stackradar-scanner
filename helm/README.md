@@ -463,14 +463,18 @@ cosign verify \
 
 Each release pins its image by digest in `image.digest`, so the deployed
 container is the exact artifact that was built, signed, and attested by that
-release — regardless of what the tag points at later. The image also carries
-SLSA provenance and an SBOM attestation:
+release — regardless of what the tag points at later. The image is built for
+`linux/amd64` and `linux/arm64` and carries SLSA provenance and an SBOM as
+BuildKit attestations in the image index — readable with `imagetools`, not
+with `cosign verify-attestation`, which looks for a separate `.att` artifact
+the release does not produce:
 
 ```bash
-cosign verify-attestation --type slsaprovenance \
-  --certificate-identity-regexp "^https://github.com/lockdep/stackradar-scanner/" \
-  --certificate-oidc-issuer "$ISSUER" \
-  ghcr.io/lockdep/stackradar-scanner:<version>
+docker buildx imagetools inspect \
+  ghcr.io/lockdep/stackradar-scanner:<version> --format '{{json .Provenance}}'
+
+docker buildx imagetools inspect \
+  ghcr.io/lockdep/stackradar-scanner:<version> --format '{{json .SBOM}}'
 ```
 
 ## What you are installing
@@ -485,9 +489,8 @@ actually does is part of the deal:
   the image:
 
   ```bash
-  cosign download attestation \
-    --predicate-type https://spdx.dev/Document \
-    ghcr.io/lockdep/stackradar-scanner:<version> | jq -r '.payload' | base64 -d | jq .predicate
+  docker buildx imagetools inspect \
+    ghcr.io/lockdep/stackradar-scanner:<version> --format '{{json .SBOM}}'
   ```
 
 - The **RBAC the chart grants** is in `templates/clusterrole.yaml` in this
