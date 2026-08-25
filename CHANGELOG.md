@@ -18,6 +18,25 @@ Removed, Fixed, Security — so use those six and nothing else.
 
 ## [Unreleased]
 
+### Added
+
+- **Scan failures are now reported with a reason.** When syft cannot pull an
+  image, the agent classifies the failure — registry authentication
+  (401/403/denied), registry rate limiting (429/TOOMANYREQUESTS), or a generic
+  scan error — and reports the code and registry host on its 5-minute
+  inventory cycle, so the StackRadar coverage card can say *why* an image has
+  no SBOM instead of "generating SBOMs" forever. Only the code and the host
+  leave the cluster, never syft's output; retry behaviour is unchanged, and a
+  successful upload clears the reported failure. Works against a StackRadar
+  control plane that predates the field too — older servers ignore it.
+
+### Fixed
+
+- syft's filesystem cache now lives under the `/tmp` scratch volume
+  (`SYFT_CACHE_DIR`, overridable). It previously defaulted to `/.cache/syft`,
+  which `readOnlyRootFilesystem` makes unwritable, so every scan logged
+  `WARN unable to get filesystem cache` before doing anything.
+
 ## [0.2.0] - 2026-08-23
 
 ### Added
