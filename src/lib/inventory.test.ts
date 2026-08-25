@@ -926,6 +926,42 @@ describe("buildInventory", () => {
         expect(report.namespaces).toEqual([]);
     });
 
+    describe("scan failures", () => {
+        const failureA = { imageDigest: DIGEST_A, code: "registry_auth" as const, registryHost: "ghcr.io" };
+        const failureB = { imageDigest: DIGEST_B, code: "registry_rate_limited" as const, registryHost: "public.ecr.aws" };
+
+        it("attaches failures for digests the report carries", () => {
+            const report = buildInventory(
+                [deploymentPod("api-7d9f8b6c4d-abcde", "api", "7d9f8b6c4d")],
+                { scanFailures: [failureA] },
+            );
+            expect(report.scanFailures).toEqual([failureA]);
+        });
+
+        it("filters out failures whose digest is no longer running", () => {
+            // DIGEST_B left the cluster; asserting its failure would pin an
+            // error onto an image row nothing references any more.
+            const report = buildInventory(
+                [deploymentPod("api-7d9f8b6c4d-abcde", "api", "7d9f8b6c4d")],
+                { scanFailures: [failureA, failureB] },
+            );
+            expect(report.scanFailures).toEqual([failureA]);
+        });
+
+        it("omits the field entirely when nothing failed", () => {
+            // Additive to v3: a cluster with nothing failing must send the
+            // wire shape it always did.
+            const clean = buildInventory([deploymentPod("api-7d9f8b6c4d-abcde", "api", "7d9f8b6c4d")]);
+            expect("scanFailures" in clean).toBe(false);
+
+            const filteredToNothing = buildInventory(
+                [deploymentPod("api-7d9f8b6c4d-abcde", "api", "7d9f8b6c4d")],
+                { scanFailures: [failureB] },
+            );
+            expect("scanFailures" in filteredToNothing).toBe(false);
+        });
+    });
+
     it("counts exactly what the scan queue would enqueue", () => {
         const pods = [
             deploymentPod("api-7d9f8b6c4d-abcde", "api", "7d9f8b6c4d"),

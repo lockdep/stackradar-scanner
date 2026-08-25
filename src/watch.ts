@@ -47,6 +47,7 @@ import {
     recordInformerEvent,
 } from "./lib/health.js";
 import { log } from "./lib/logger.js";
+import { classifyScanFailure, type ScanFailure } from "./lib/scan-failure.js";
 import { parseImageRef } from "./parse-image-ref.js";
 
 validateConfig();
@@ -91,6 +92,28 @@ class BoundedSet<T> {
 
 const seenDigests = new BoundedSet<string>(SEEN_DIGESTS_MAX);
 const sem = new Semaphore(CONCURRENT_SCANS);
+
+/**
+ * Why the last scan of a digest failed, keyed by digest — the memory behind
+ * the report's `scanFailures`. Display-only by contract: nothing here feeds
+ * retry decisions. An entry leaves three ways: the scan succeeds, the digest
+ * stops appearing in inventory reports (pruned in `publishInventory`), or a
+ * pathological cluster overflows the same bound `seenDigests` has.
+ */
+const scanFailures = new Map<string, ScanFailure>();
+
+function recordScanFailure(info: ImageInfo, stderr: string): ScanFailure {
+    const failure: ScanFailure = {
+        imageDigest: info.digest!,
+        code: classifyScanFailure(stderr),
+        registryHost: parseImageRef(info.displayName).registry ?? null,
+    };
+    if (scanFailures.size >= SEEN_DIGESTS_MAX && !scanFailures.has(failure.imageDigest)) {
+        scanFailures.delete(scanFailures.keys().next().value!);
+    }
+    scanFailures.set(failure.imageDigest, failure);
+    return failure;
+}
 
 /** Scans in flight, so shutdown can wait for them. */
 let inFlightScans = 0;
@@ -175,6 +198,7 @@ async function publishInventory(
         ownerMetadataCollected: resolved.collected,
         applications: argocd ? await argocd.list() : undefined,
         argocdNamespace: ARGOCD_NAMESPACE,
+        scanFailures: [...scanFailures.values()],
     };
 
     const report = buildInventory(pods, ctx);
@@ -186,6 +210,16 @@ async function publishInventory(
         log.debug("informer sees no scannable workloads, skipping inventory report");
         return;
     }
+    /* The build filtered `scanFailures` to digests the report carries; prune
+       the memory to the same set. A digest that left the cluster and comes
+       back re-records itself on its next failed scan, so nothing is lost —
+       and without the prune, failures for long-gone images accumulate for the
+       life of the process. */
+    const stillReported = new Set((report.scanFailures ?? []).map((f) => f.imageDigest));
+    for (const digest of [...scanFailures.keys()]) {
+        if (!stillReported.has(digest)) scanFailures.delete(digest);
+    }
+
     try {
         await reportInventory(report);
     } catch (err) {
@@ -214,6 +248,9 @@ async function scanImage(info: ImageInfo, coreApi: k8s.CoreV1Api): Promise<ScanO
         if (SKIP_EXISTING_DIGESTS) {
             const check = await checkExistingSbom(info.digest!);
             if (check === "exists") {
+                // An SBOM landed for this digest — whatever failure we
+                // remember predates it and must stop being reported.
+                scanFailures.delete(info.digest!);
                 log.debug({ image: info.displayName, digest: info.digest }, "digest already indexed, skipping");
                 return "done";
             }
@@ -243,14 +280,22 @@ async function scanImage(info: ImageInfo, coreApi: k8s.CoreV1Api): Promise<ScanO
 
         try {
             sbomFile = await generateSBOM(info.pullRef, dockerConfigDir);
+            // The scan works again; the remembered failure is over. The
+            // server-side columns clear on the *upload*, not here — this only
+            // stops the next inventory from re-asserting a stale failure.
+            scanFailures.delete(info.digest!);
         } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
-            log.error({ image: info.displayName, err: msg }, "syft failed");
+            const failure = recordScanFailure(info, msg);
+            log.error({ image: info.displayName, code: failure.code, err: msg }, "syft failed");
             /* syft cannot tell us whether the registry said 401 or 503 in a
-               form worth parsing, so every syft failure is retried once the
-               cooldown passes — a wrong credential costs one more pull attempt
-               per cooldown, a flaky registry costs nothing. A SIGTERM mid-pull
-               is the one case that is certainly not the image's fault. */
+               form worth parsing *for control flow*, so every syft failure is
+               retried once the cooldown passes — a wrong credential costs one
+               more pull attempt per cooldown, a flaky registry costs nothing.
+               A SIGTERM mid-pull is the one case that is certainly not the
+               image's fault. The classification above is display-only: it
+               rides the next inventory report so the coverage card can say
+               *why*, and it never changes what is retried. */
             return "retry";
         }
 

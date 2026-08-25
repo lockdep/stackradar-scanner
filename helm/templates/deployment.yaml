@@ -151,6 +151,13 @@ spec:
             # itself documents that the only egress is the API and registries.
             - name: SYFT_CHECK_FOR_APP_UPDATE
               value: "false"
+            # syft's cache defaults to $XDG_CACHE_HOME/syft, which with no HOME
+            # resolves to /.cache — unwritable under readOnlyRootFilesystem, so
+            # every run logged a WARN before doing anything. The agent defaults
+            # this under os.tmpdir() itself; set here as well so the pod spec
+            # documents that the cache lives on the /tmp scratch volume.
+            - name: SYFT_CACHE_DIR
+              value: /tmp/syft-cache
             # Reported to the control plane via the `X-Scanner-Version` header
             # so the UI can flag clusters running an outdated Helm chart.
             - name: STACKRADAR_SCANNER_VERSION

@@ -5,6 +5,7 @@ import * as os from "os";
 import * as path from "path";
 import { promisify } from "util";
 import { log } from "./logger.js";
+import type { ScanFailure } from "./scan-failure.js";
 import { isBareImageId, parseImageRef } from "../parse-image-ref.js";
 
 // ─── Config ──────────────────────────────────────────────────────────────────
@@ -593,10 +594,18 @@ export const CYCLONEDX_SPEC_VERSION = "1.6";
  *   and the chart sets this too — but the image must not depend on the chart
  *   for it.
  * - `SYFT_QUIET`: keeps the progress UI out of the log stream.
+ *
+ * And one default rather than an override: `SYFT_CACHE_DIR`. syft's cache
+ * defaults to `$XDG_CACHE_HOME/syft`, which with no HOME set resolves to
+ * `/.cache/syft` — unwritable under the chart's `readOnlyRootFilesystem`, so
+ * every run opened with a WARN that polluted exactly the stderr the failure
+ * classifier now reads. Pointed under the tmpdir, which in the pod is the
+ * `/tmp` scratch volume; an operator-set `SYFT_CACHE_DIR` wins.
  */
 export function syftEnv(dockerConfigDir?: string): NodeJS.ProcessEnv {
     return {
         ...process.env,
+        SYFT_CACHE_DIR: process.env.SYFT_CACHE_DIR ?? path.join(os.tmpdir(), "syft-cache"),
         SYFT_CHECK_FOR_APP_UPDATE: "false",
         SYFT_QUIET: "true",
         ...(dockerConfigDir ? { DOCKER_CONFIG: dockerConfigDir } : {}),
@@ -841,6 +850,12 @@ export interface InventoryReport {
     releases: InventoryRelease[];
     applications: InventoryApplication[];
     namespaces: InventoryNamespace[];
+    /**
+     * Why a digest in this report has no SBOM — display-only classification,
+     * additive to v3 (an older server ignores it). Omitted when empty, so a
+     * cluster with nothing failing sends the wire shape it always did.
+     */
+    scanFailures?: ScanFailure[];
 }
 
 /**
@@ -1114,6 +1129,13 @@ export interface InventoryContext {
     applications?: ReadonlyMap<string, InventoryApplication>;
     /** Where `Application` objects live when a tracking ID does not say. */
     argocdNamespace?: string;
+    /**
+     * The scan failures `watch.ts` has recorded, in whatever order. The build
+     * filters them to digests the report actually carries: a failure whose
+     * image stopped running is not a fact about the cluster any more, and
+     * sending it would pin an error onto an image row nothing references.
+     */
+    scanFailures?: readonly ScanFailure[];
 }
 
 /**
@@ -1147,11 +1169,14 @@ export function buildInventory(
     const containers = new Map<string, InventoryContainer>();
     // Release ↔ delivering application pairs, joined after the merge settles.
     const releaseApplications = new Map<string, InventoryApplication[]>();
+    // Every digest the report carries, for the scan-failure filter below.
+    const reportedDigests = new Set<string>();
 
     for (const pod of pods) {
         const podId = `${pod.metadata?.namespace ?? ""}/${pod.metadata?.name ?? ""}`;
         for (const info of podImages(pod, ctx.owners)) {
             if (!info.digest) continue;
+            reportedDigests.add(info.digest);
 
             let ns = namespaces.get(info.namespace);
             if (!ns) {
@@ -1273,6 +1298,10 @@ export function buildInventory(
         if (source) release.repoUrl = source.repoUrl;
     }
 
+    const scanFailures = (ctx.scanFailures ?? []).filter((f) =>
+        reportedDigests.has(f.imageDigest)
+    );
+
     return {
         version: INVENTORY_VERSION,
         // Advisory only — the server stamps rows with its own clock, because
@@ -1289,5 +1318,6 @@ export function buildInventory(
         releases: [...releases.values()],
         applications: [...applications.values()],
         namespaces: [...namespaces.values()],
+        ...(scanFailures.length > 0 ? { scanFailures } : {}),
     };
 }
