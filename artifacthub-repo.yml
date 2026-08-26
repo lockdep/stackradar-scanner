@@ -1,0 +1,14 @@
+# Artifact Hub repository metadata. Pushed to the chart's OCI registry as a
+# separate artifact (tag `artifacthub.io`) so Artifact Hub can verify that
+# whoever controls ghcr.io/lockdep/charts/stackradar-scanner also owns the
+# Artifact Hub repository — that is what grants the "Verified publisher"
+# badge. Not part of the chart itself.
+#
+# Push (one-off, re-run only if this file changes):
+#   oras push ghcr.io/lockdep/charts/stackradar-scanner:artifacthub.io \
+#     --config /dev/null:application/vnd.cncf.artifacthub.config.v1+yaml \
+#     artifacthub-repo.yml:application/vnd.cncf.artifacthub.repository-metadata.layer.v1.yaml
+repositoryID: 2f86d5a3-c1eb-4354-87ac-9bc4d627abb3
+owners:
+  - name: StackRadar
+    email: support@stackradar.io
