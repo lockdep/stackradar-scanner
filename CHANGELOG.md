@@ -18,6 +18,16 @@ Removed, Fixed, Security — so use those six and nothing else.
 
 ## [Unreleased]
 
+### Changed
+
+- **Stable 0.x releases are no longer marked "Pre-release" on Artifact Hub.**
+  The chart used to carry `artifacthub.io/prerelease: "true"` on every version
+  below 1.0.0, so all releases showed the badge even though they are the
+  supported line. The annotation is now set only on release candidates
+  (`vX.Y.Z-rc.N`); stable tags ship without it. Nothing to configure, and
+  nothing changes for existing installs — this is chart metadata only, and
+  versions already published keep the badge they were released with.
+
 ## [0.3.0] - 2026-08-25
 
 ### Added
