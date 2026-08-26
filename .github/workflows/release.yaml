@@ -343,14 +343,13 @@ jobs:
           export IMAGES
           yq -i '.annotations."artifacthub.io/images" = strenv(IMAGES)' helm/Chart.yaml
 
-          # Artifact Hub's prerelease flag tracks semver, not the tag's
-          # `-rc` suffix alone: anything below 1.0.0 is a prerelease too.
+          # Artifact Hub's prerelease badge follows the tag's `-rc` suffix
+          # only. 0.x releases are the real, supported line and are not
+          # flagged; the annotation is absent on a stable release.
           case "${VERSION}" in
-            0.*|*-*) PRERELEASE_FLAG=true ;;
-            *)       PRERELEASE_FLAG=false ;;
+            *-*) yq -i '.annotations."artifacthub.io/prerelease" = "true" | .annotations."artifacthub.io/prerelease" style="double"' helm/Chart.yaml ;;
+            *)   yq -i 'del(.annotations."artifacthub.io/prerelease")' helm/Chart.yaml ;;
           esac
-          export PRERELEASE_FLAG
-          yq -i '.annotations."artifacthub.io/prerelease" = strenv(PRERELEASE_FLAG) | .annotations."artifacthub.io/prerelease" style="double"' helm/Chart.yaml
 
           # ArtifactHub renders this as the release's changelog entry. The
           # CHANGELOG.md section is authoritative when there is one; commit

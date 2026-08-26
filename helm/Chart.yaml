@@ -46,9 +46,6 @@ icon: https://stackradar.io/apple-icon
 # built image digest. The values below are dev placeholders.
 annotations:
   artifacthub.io/category: security
-  # 0.x: the public value names are stable, but the agent has not yet been
-  # through a major release. Cleared by the release workflow for a 1.0.0 tag.
-  artifacthub.io/prerelease: "true"
   # Source-available, not open source: use is permitted except to build or run
   # something that competes with StackRadar. Full terms ship in the chart as
   # LICENSE.md, as the license's Notices section requires.
