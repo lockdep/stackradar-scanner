@@ -1,0 +1,6 @@
+<!-- README heading variant of logo.svg: the same ring, in a 64x80 box so that
+     rendered at 32x40 it fills GitHub's h1 line box (32px font, 1.25 line-height)
+     and, with align="top", the ring centres on the cap height of the text. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="80" viewBox="0 0 64 80" role="img" aria-label="StackRadar">
+  <circle cx="32" cy="40" r="26.5" fill="none" stroke="#0969da" stroke-width="11"/>
+</svg>

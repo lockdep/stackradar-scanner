@@ -1,4 +1,6 @@
-# StackRadar Scanner
+<h1>
+  <img src=".github/logo-heading.svg" alt="" width="32" height="40" align="top"> StackRadar Scanner
+</h1>
 
 [![Release](https://img.shields.io/github/v/release/lockdep/stackradar-scanner?style=flat-square&label=Release)](https://github.com/lockdep/stackradar-scanner/releases/latest)
 [![Artifact Hub](https://img.shields.io/endpoint?url=https://artifacthub.io/badge/repository/stackradar&style=flat-square)](https://artifacthub.io/packages/helm/stackradar/stackradar-scanner)
