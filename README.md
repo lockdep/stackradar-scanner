@@ -1,6 +1,7 @@
 # StackRadar Scanner
 
 [![Release](https://img.shields.io/github/v/release/lockdep/stackradar-scanner?style=flat-square&label=Release)](https://github.com/lockdep/stackradar-scanner/releases/latest)
+[![Artifact Hub](https://img.shields.io/endpoint?url=https://artifacthub.io/badge/repository/stackradar&style=flat-square)](https://artifacthub.io/packages/helm/stackradar/stackradar-scanner)
 [![License: PolyForm Shield 1.0.0](https://img.shields.io/badge/License-PolyForm%20Shield%201.0.0-informational?style=flat-square)](LICENSE.md)
 [![Signed with cosign](https://img.shields.io/badge/Signed-cosign%20keyless-informational?style=flat-square)](#verifying-what-you-install)
 
