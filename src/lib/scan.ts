@@ -6,6 +6,7 @@ import * as path from "path";
 import { promisify } from "util";
 import { log } from "./logger.js";
 import type { ScanFailure } from "./scan-failure.js";
+import { IMAGE_METADATA_ENABLED, imageProperties, mergeImageProperties, readLayerMetadata } from "./image-metadata.js";
 import { isBareImageId, parseImageRef } from "../parse-image-ref.js";
 
 // ─── Config ──────────────────────────────────────────────────────────────────
@@ -612,23 +613,80 @@ export function syftEnv(dockerConfigDir?: string): NodeJS.ProcessEnv {
     };
 }
 
-export async function generateSBOM(pullRef: string, dockerConfigDir?: string): Promise<string> {
-    const tmpFile = path.join(
-        os.tmpdir(),
-        `sbom-${Date.now()}-${Math.random().toString(36).slice(2)}.json`
-    );
+/**
+ * syft's catalog scope. `deep-squashed` reports the same package set as the
+ * default `squashed` scope — what is in the final filesystem, none of
+ * `all-layers`' ghosts — but gives each package a location in every layer it
+ * existed in, earliest first.
+ *
+ * That is what makes layer attribution possible at all. Under `squashed`,
+ * location 0 of an OS package is the package *database* (`/lib/apk/db/installed`,
+ * the rpmdb), which belongs to the last layer that ran the package manager:
+ * one `apk add` in your Dockerfile and every package of the base image reads
+ * as yours. Measured on `nginx:1.27-alpine`: 15 of 68 apk packages come from
+ * the base, squashed puts all 68 in layer 7, deep-squashed puts 15 in layer 0.
+ * It changes no disclosed data, so it is not behind `scanner.imageMetadata`.
+ */
+export const SYFT_SCOPE = "deep-squashed";
 
-    await execFileAsync(
-        "syft",
-        [`registry:${pullRef}`, "-o", `cyclonedx-json@${CYCLONEDX_SPEC_VERSION}=${tmpFile}`],
-        {
+/** The arguments of one syft run. Exported so the test can hold the scope and the spec pin. */
+export function syftArgs(pullRef: string, sbomFile: string, metaFile: string | null): string[] {
+    return [
+        `registry:${pullRef}`,
+        "--scope", SYFT_SCOPE,
+        "-o", `cyclonedx-json@${CYCLONEDX_SPEC_VERSION}=${sbomFile}`,
+        // A second encoding of the same catalog, not a second scan: the
+        // image source — ordered layers, config, manifest — that CycloneDX
+        // has no place for. Read and deleted by `attachImageMetadata`.
+        ...(metaFile ? ["-o", `syft-json=${metaFile}`] : []),
+    ];
+}
+
+export interface GeneratedSbom {
+    /** The CycloneDX document that is uploaded. */
+    sbomFile: string;
+    /** syft-json of the same run, or null with `STACKRADAR_IMAGE_METADATA=false`. Never uploaded. */
+    metaFile: string | null;
+}
+
+export async function generateSBOM(pullRef: string, dockerConfigDir?: string): Promise<GeneratedSbom> {
+    const stem = path.join(os.tmpdir(), `sbom-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    const sbomFile = `${stem}.json`;
+    const metaFile = IMAGE_METADATA_ENABLED ? `${stem}.syft.json` : null;
+
+    try {
+        await execFileAsync("syft", syftArgs(pullRef, sbomFile, metaFile), {
             timeout: SYFT_TIMEOUT_MS,
             maxBuffer: 10 * 1024 * 1024,
             env: syftEnv(dockerConfigDir),
-        }
-    );
+        });
+    } catch (err) {
+        // A failed run can leave either file half-written on the scratch volume.
+        for (const file of [sbomFile, metaFile]) if (file) try { fs.unlinkSync(file); } catch { /* ignore */ }
+        throw err;
+    }
 
-    return tmpFile;
+    return { sbomFile, metaFile };
+}
+
+/**
+ * Move the image facts from syft's second output onto the CycloneDX
+ * document, then delete the second output — it can be tens of megabytes and
+ * nothing else reads it. Never throws: metadata is an addition, and an SBOM
+ * without it is still the SBOM. Returns how many properties were attached.
+ */
+export function attachImageMetadata(generated: GeneratedSbom): number {
+    if (!generated.metaFile) return 0;
+    try {
+        const meta = readLayerMetadata(generated.metaFile);
+        if (!meta) return 0;
+        const properties = imageProperties(meta);
+        return mergeImageProperties(generated.sbomFile, properties) ? properties.length : 0;
+    } catch {
+        return 0;
+    } finally {
+        try { fs.unlinkSync(generated.metaFile); } catch { /* ignore */ }
+    }
 }
 
 
