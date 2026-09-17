@@ -41,7 +41,7 @@ use 300–600 MiB on a large image.
 
 ```bash
 helm install stackradar-scanner oci://ghcr.io/lockdep/charts/stackradar-scanner \
-  --version 0.3.0 \
+  --version 0.4.0 \
   --namespace stackradar --create-namespace
 
 kubectl create secret generic stackradar-scanner \
