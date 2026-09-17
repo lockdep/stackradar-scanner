@@ -18,7 +18,35 @@ Removed, Fixed, Security — so use those six and nothing else.
 
 ## [Unreleased]
 
+### Added
+
+- **The agent now sends image metadata beside each SBOM — this widens what
+  leaves your cluster.** For every image it scans, the upload carries the
+  image's ordered layer list with the Dockerfile line that made each layer,
+  and a fixed set of facts from the image config and manifest: the OCI
+  base-image, source and version annotations, architecture and OS, the image's
+  default user, the executable it starts, and `ENV` keys ending `_VERSION`.
+  StackRadar uses it to separate the findings your own build added from the
+  base image's, and to recommend a newer base. What is sent is a literal,
+  snapshot-tested list — every property is named under "What leaves your
+  cluster" in the README — and three things never are: Dockerfile lines are
+  redacted in the agent first (recorded build args dropped, secret-named
+  values, `Bearer`/`Basic` credentials and URL userinfo masked, 200-character
+  cap); `CMD` / `ENTRYPOINT` are sent as `argv[0]` only, never their
+  arguments (a `CMD` that *is* the entrypoint's arguments — it starts with
+  `-` or carries a `=` — is not sent at all); and no other environment variable leaves. **Opt out with
+  `scanner.imageMetadata=false`**: the upload is then syft's CycloneDX
+  document and nothing else, and everything except base-image attribution
+  works as before.
+
 ### Changed
+
+- **syft now runs with `--scope deep-squashed`.** The package set is the same
+  as before — what is in the image's final filesystem — but each package now
+  records every layer it existed in rather than only the layer of the package
+  database, which for apk and rpm images was always the last layer to run the
+  package manager. No new findings, no new data leaving the cluster; SBOMs are
+  about 1 % larger. Images already scanned pick it up on their next scan.
 
 - **Stable 0.x releases are no longer marked "Pre-release" on Artifact Hub.**
   The chart used to carry `artifacthub.io/prerelease: "true"` on every version

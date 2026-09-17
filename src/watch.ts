@@ -19,6 +19,7 @@ import {
     resolveRegistryAuth,
     buildTempDockerConfig,
     generateSBOM,
+    attachImageMetadata,
     Semaphore,
     podImages,
     buildInventory,
@@ -279,7 +280,10 @@ async function scanImage(info: ImageInfo, coreApi: k8s.CoreV1Api): Promise<ScanO
         }
 
         try {
-            sbomFile = await generateSBOM(info.pullRef, dockerConfigDir);
+            const generated = await generateSBOM(info.pullRef, dockerConfigDir);
+            sbomFile = generated.sbomFile;
+            const attached = attachImageMetadata(generated);
+            log.debug({ image: info.displayName, properties: attached }, "image metadata attached");
             // The scan works again; the remembered failure is over. The
             // server-side columns clear on the *upload*, not here — this only
             // stops the next inventory from re-asserting a stale failure.

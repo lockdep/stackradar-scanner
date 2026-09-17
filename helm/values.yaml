@@ -84,6 +84,21 @@ scanner:
   # `targetRevision` to point at.
   resolveArgocdApplications: true
 
+  # -- Send image metadata beside each SBOM: the image's ordered layer list with
+  # the (redacted) Dockerfile line that made each layer, and a fixed set of
+  # facts from the image config and manifest — base-image annotations, OCI
+  # source/version labels, architecture, the default user, the executable the
+  # image starts, and environment keys ending `_VERSION`. It is what lets
+  # StackRadar tell base-image findings from the ones your own build added and
+  # recommend a newer base.
+  #
+  # Every property is listed by name under "What leaves your cluster" in the
+  # README. Secrets are masked in the agent before anything is sent, command
+  # arguments and all other environment variables never are sent. Set to false
+  # and the upload is syft's CycloneDX document and nothing else; findings and
+  # scores are unaffected, base-image attribution is not available.
+  imageMetadata: true
+
   # -- Namespace holding your ArgoCD `Application` objects. Only used when
   # `scanner.resolveArgocdApplications` is "true".
   #

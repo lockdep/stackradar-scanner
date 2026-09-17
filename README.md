@@ -173,6 +173,42 @@ image on upload, everything else in the inventory report described below:
   own value always wins where both carry a key.
 - **The repository URL, chart, path and target revision** of an ArgoCD
   `Application`, where one exists. Not its manifests, and not its sync status.
+- **Image metadata**, as `stackradar:*` properties on the SBOM's
+  `metadata.component` — added in 0.4.0, on by default, off with
+  `scanner.imageMetadata=false`. It is what lets StackRadar tell the base
+  image's findings from the ones your own build added. Exactly these, and no
+  others:
+  - per image-history entry `N`: `stackradar:layer:N:diffId`, `:size`,
+    `:emptyLayer`, `:created`, and `:createdBy` — the Dockerfile line that made
+    the layer, **redacted in the agent before it is sent** (see below) and cut
+    to 200 characters;
+  - `stackradar:image:created`;
+  - `stackradar:image:entrypoint` and `stackradar:image:cmd` — **`argv[0]`
+    only**, the executable path, never its arguments. Where the image's `CMD`
+    is its entrypoint's default arguments (`--config.file=…`), nothing is sent
+    for it;
+  - from the OCI keys `org.opencontainers.image.*`, read off the manifest's
+    annotations first and the image's labels second:
+    `stackradar:image:baseName`, `:baseDigest`, `:source`, `:version`,
+    `:revision`, `:vendor`, `:title`, `:url`, `:licenses`;
+  - `stackradar:image:official` when the manifest carries a
+    `com.docker.official-images.*` annotation;
+  - `stackradar:image:buildpackRunImage` and `:buildpackTopLayer`, from the
+    Cloud Native Buildpacks lifecycle label, where there is one;
+  - `stackradar:image:env:<KEY>` — the image's `ENV`, **only** for keys
+    matching `^[A-Z0-9_]+_VERSION$` (`NODE_VERSION`, `JAVA_VERSION`, …);
+  - `stackradar:image:user` (the image's default user),
+    `stackradar:image:architecture`, `:os`, `:variant`.
+
+  The redaction of a history line, in order: a `CMD` / `ENTRYPOINT` line is
+  cut to the instruction and its `argv[0]`; a recorded build-arg prefix
+  (`|1 NPM_TOKEN=… /bin/sh -c …`) is dropped whole; the value after anything
+  named `token`, `secret`, `password`, `passwd`, `key`, `auth` or `credential`
+  is masked, as is any `Bearer` / `Basic` credential; `user:token@` userinfo
+  in URLs is redacted; then the 200-character cut. The names above are a
+  literal list in [`src/lib/image-metadata.ts`](src/lib/image-metadata.ts)
+  (`IMAGE_METADATA_PROPERTY_NAMES`, `ENV_VERSION_KEY`), snapshot-tested like
+  the label allowlists, so widening it is a visible diff in a test.
 - Your cluster ID, and the agent version in an `X-Scanner-Version` header.
 - **The cluster's Kubernetes version** (`gitVersion` from `/version`, e.g.
   `v1.29.4+k3s1`), in an `X-Kubernetes-Version` header on the heartbeat. Used
@@ -221,8 +257,10 @@ build time if that matters to you.
 - **Registry credentials.** Resolved `imagePullSecrets` are written to a
   temporary Docker config on the pod's `emptyDir` and handed to syft to pull
   with. They are never transmitted.
-- **Secret or ConfigMap contents**, environment variables, and command-line
-  arguments of your workloads.
+- **Secret or ConfigMap contents**, and your workloads' environment variables
+  and command-line arguments — the pod spec's are never read.
+- **An image's `ENV`**, other than keys ending `_VERSION`, and the
+  **arguments of its `CMD` / `ENTRYPOINT`** — only the executable path is sent.
 - **Container filesystems.** Only the package inventory syft derives from the
   image is uploaded, never file contents.
 - **Any label or annotation outside the allowlists above**, and raw pod names.

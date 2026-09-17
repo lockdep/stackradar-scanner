@@ -54,6 +54,7 @@
         "resolveImagePullSecrets": { "$ref": "#/$defs/boolean" },
         "resolveWorkloadOwners":   { "$ref": "#/$defs/boolean" },
         "resolveArgocdApplications": { "$ref": "#/$defs/boolean" },
+        "imageMetadata":           { "$ref": "#/$defs/boolean" },
         "argocdNamespace":         { "type": "string", "minLength": 1, "maxLength": 63 },
         "imagePullSecretNames":    { "type": "array", "items": { "type": "string" } }
       }
