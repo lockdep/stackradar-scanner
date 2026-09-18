@@ -18,6 +18,37 @@ Removed, Fixed, Security — so use those six and nothing else.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The documented upgrade command failed across versions.** Every
+  `helm upgrade` in the chart README used `--reuse-values`, which carries the
+  *previous chart's defaults* forward along with your own values — and a
+  released chart's defaults pin the image it shipped with. Upgrading 0.3.0 to
+  0.4.0 that way stopped with `image.tag is set to "0.3.0" but image.digest …
+  still pins a different image`; nothing was changed in the cluster, but
+  nothing was upgraded either. The README now has an **Upgrading** section, and
+  every example pipes `helm get values -o yaml` into `helm upgrade -f -`
+  instead, which takes the new chart's defaults and re-applies only the values
+  you set, on any supported Helm.
+
+  ```bash
+  helm get values stackradar-scanner --namespace stackradar -o yaml | \
+    helm upgrade stackradar-scanner oci://ghcr.io/lockdep/charts/stackradar-scanner \
+    --version <version> \
+    --namespace stackradar -f -
+  ```
+
+  On Helm 3.14+ `--reset-then-reuse-values` does the same. If you hit the
+  error, do not follow its `--set image.digest=""` hint — that runs the old
+  agent under the new chart. Run the command above instead.
+
+### Changed
+
+- **The tag/digest error now says what to do when you are upgrading.** It
+  names `--reuse-values` as the likely cause and gives the command above
+  first; the advice for deliberately running a different image follows it. The
+  agent itself is unchanged from 0.4.0.
+
 ## [0.4.0] - 2026-09-17
 
 ### Added

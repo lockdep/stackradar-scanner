@@ -58,6 +58,49 @@ kubectl create secret generic stackradar-scanner \
   --from-literal=api-key=<your-api-key>
 ```
 
+## Upgrading
+
+```bash
+helm get values stackradar-scanner --namespace stackradar -o yaml | \
+  helm upgrade stackradar-scanner oci://ghcr.io/lockdep/charts/stackradar-scanner \
+  --version <version> \
+  --namespace stackradar -f -
+```
+
+The first command prints the values *you* set on the installed release — the
+API URL, an inline key, pull-secret names — and `-f -` hands exactly those to
+the new chart. Everything you did not set comes from the new chart's defaults,
+which is the point of upgrading. A credentials Secret you created with
+`kubectl` is not part of the release and is left alone. Every `helm upgrade` in
+this document has the same shape; a `--set` after `-f -` wins over it, so that
+is where a changed setting goes.
+
+**Do not use `--reuse-values` to change versions.** It carries the *old
+chart's defaults* forward along with your own values, and a released chart's
+defaults include the tag and digest of the image it was tested against
+(see [Versioning](#versioning)). The new chart is then told to run the old
+image, and refuses:
+
+```
+Error: UPGRADE FAILED: … image.tag is set to "0.3.0" but image.digest (sha256:…)
+still pins a different image, and the digest wins.
+```
+
+Do not follow that message's `--set image.digest=""` suggestion here — it is
+written for someone deliberately running a different image, and on an upgrade
+it would get you the new chart around the old agent. Run the command above
+instead; the failed upgrade changed nothing. On Helm 3.14 or newer,
+`--reset-then-reuse-values` is a shorthand for the same thing.
+
+Then confirm the rollout:
+
+```bash
+kubectl rollout status deployment/stackradar-scanner-watcher -n stackradar
+```
+
+The StackRadar app shows the version each cluster's scanner reports, and says
+so when a newer release is available.
+
 ## Passing credentials inline (CI/CD)
 
 ```bash
@@ -172,9 +215,10 @@ kubectl create configmap stackradar-ca \
   --namespace stackradar \
   --from-file=ca-certificates.crt=/path/to/your-ca.crt
 
-helm upgrade stackradar-scanner oci://ghcr.io/lockdep/charts/stackradar-scanner \
+helm get values stackradar-scanner --namespace stackradar -o yaml | \
+  helm upgrade stackradar-scanner oci://ghcr.io/lockdep/charts/stackradar-scanner \
   --version <version> \
-  --namespace stackradar --reuse-values \
+  --namespace stackradar -f - \
   --set caBundle.configMapName=stackradar-ca
 ```
 
@@ -227,18 +271,20 @@ it.
 **EKS** — [IAM roles for service accounts](https://docs.aws.amazon.com/eks/latest/userguide/iam-roles-for-service-accounts.html):
 
 ```bash
-helm upgrade stackradar-scanner oci://ghcr.io/lockdep/charts/stackradar-scanner \
+helm get values stackradar-scanner --namespace stackradar -o yaml | \
+  helm upgrade stackradar-scanner oci://ghcr.io/lockdep/charts/stackradar-scanner \
   --version <version> \
-  --namespace stackradar --reuse-values \
+  --namespace stackradar -f - \
   --set-string 'serviceAccount.annotations.eks\.amazonaws\.com/role-arn=arn:aws:iam::<account>:role/<role>'
 ```
 
 **GKE** — [Workload Identity Federation](https://cloud.google.com/kubernetes-engine/docs/how-to/workload-identity):
 
 ```bash
-helm upgrade stackradar-scanner oci://ghcr.io/lockdep/charts/stackradar-scanner \
+helm get values stackradar-scanner --namespace stackradar -o yaml | \
+  helm upgrade stackradar-scanner oci://ghcr.io/lockdep/charts/stackradar-scanner \
   --version <version> \
-  --namespace stackradar --reuse-values \
+  --namespace stackradar -f - \
   --set-string 'serviceAccount.annotations.iam\.gke\.io/gcp-service-account=<name>@<project>.iam.gserviceaccount.com'
 ```
 
@@ -246,9 +292,10 @@ helm upgrade stackradar-scanner oci://ghcr.io/lockdep/charts/stackradar-scanner 
 reads a label on the pod as well as an annotation:
 
 ```bash
-helm upgrade stackradar-scanner oci://ghcr.io/lockdep/charts/stackradar-scanner \
+helm get values stackradar-scanner --namespace stackradar -o yaml | \
+  helm upgrade stackradar-scanner oci://ghcr.io/lockdep/charts/stackradar-scanner \
   --version <version> \
-  --namespace stackradar --reuse-values \
+  --namespace stackradar -f - \
   --set-string 'podLabels.azure\.workload\.identity/use=true' \
   --set-string 'podAnnotations.azure\.workload\.identity/client-id=<client-id>' \
   --set-string 'serviceAccount.annotations.azure\.workload\.identity/client-id=<client-id>'
@@ -347,9 +394,10 @@ Confirm it is the policy before changing anything else:
 kubectl logs -n stackradar deploy/stackradar-scanner-watcher | grep -i "scan failed"
 
 # Then take the policy away for a minute. If the pulls recover, it was the policy.
-helm upgrade stackradar-scanner oci://ghcr.io/lockdep/charts/stackradar-scanner \
+helm get values stackradar-scanner --namespace stackradar -o yaml | \
+  helm upgrade stackradar-scanner oci://ghcr.io/lockdep/charts/stackradar-scanner \
   --version <version> \
-  --namespace stackradar --reuse-values \
+  --namespace stackradar -f - \
   --set networkPolicy.enabled=false
 ```
 
@@ -506,7 +554,10 @@ competes with StackRadar. This is not an open source license.
 ## Versioning
 
 Chart version and application version are always the same number, cut from a
-`v*` git tag. `0.x` releases may make breaking changes in the minor position.
+`v*` git tag, and the release workflow stamps the image's tag and digest into
+the published chart's `values.yaml` — so a chart version always deploys the one
+image it was tested with, and [upgrading](#upgrading) must take the new chart's
+defaults. `0.x` releases may make breaking changes in the minor position.
 See [RELEASING.md](https://github.com/lockdep/stackradar-scanner/blob/main/RELEASING.md).
 
 ## Values
