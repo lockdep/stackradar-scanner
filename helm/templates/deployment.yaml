@@ -5,11 +5,16 @@ The digest, not the tag, selects the image: the reference below renders as
 therefore run the chart's pinned image while every `kubectl describe` showed the
 tag the user asked for. Fail instead.
 
+The commonest way to get here is not an override at all but `helm upgrade
+--reuse-values` across versions, which carries the previous chart's stamped tag
+and digest forward as if the user had set them — so the message names that
+first.
+
 The `.Values.image.tag` term is what keeps this from firing on a chart whose tag
 is the empty default — which is every chart built outside CI.
 */ -}}
 {{- if and .Values.image.digest .Values.image.tag (ne .Values.image.tag .Chart.AppVersion) }}
-{{- fail (printf "image.tag is set to %q but image.digest (%s) still pins a different image, and the digest wins. To run a different image, clear the digest as well: --set image.tag=%s --set image.digest=\"\"" .Values.image.tag .Values.image.digest .Values.image.tag) }}
+{{- fail (printf "image.tag is set to %q but image.digest (%s) still pins a different image, and the digest wins. If you are upgrading the chart, this is --reuse-values carrying the previous chart's image pin forward: drop that flag and pass your own values instead (helm get values stackradar-scanner -n stackradar -o yaml | helm upgrade ... -f -), see \"Upgrading\" in the chart README. To deliberately run a different image, clear the digest as well: --set image.tag=%s --set image.digest=\"\"" .Values.image.tag .Values.image.digest .Values.image.tag) }}
 {{- end }}
 {{- /*
 One bundle, from one object. Preferring the ConfigMap silently would mean a
