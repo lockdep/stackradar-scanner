@@ -18,6 +18,8 @@ Removed, Fixed, Security — so use those six and nothing else.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-10
+
 ### Added
 
 - **The chart installs as a dependency of the `stackradar` chart.** The
@@ -148,7 +150,8 @@ Removed, Fixed, Security — so use those six and nothing else.
   `oci://ghcr.io/lockdep/charts/stackradar-scanner`; the image and chart are
   cosigned and the image is pinned by digest.
 
-[Unreleased]: https://github.com/lockdep/stackradar-scanner/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/lockdep/stackradar-scanner/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/lockdep/stackradar-scanner/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/lockdep/stackradar-scanner/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/lockdep/stackradar-scanner/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/lockdep/stackradar-scanner/releases/tag/v0.2.0
