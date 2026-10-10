@@ -18,6 +18,32 @@ Removed, Fixed, Security — so use those six and nothing else.
 
 ## [Unreleased]
 
+### Added
+
+- **The chart installs as a dependency of the `stackradar` chart.** The
+  self-hosted StackRadar chart (`oci://ghcr.io/lockdep/helm-charts/stackradar`)
+  bundles this one and starts it scanning the cluster it lands in, pointed at
+  the server Service of the same release. Two things made that possible:
+  `values.schema.json` now allows the `global` and `enabled` keys Helm hands
+  every subchart (before this, any parent chart failed validation with
+  `Additional property enabled is not allowed`), and `stackradar.apiUrl` is
+  rendered through `tpl`, so a parent can write
+  `http://{{ .Release.Name }}-server.{{ .Release.Namespace }}.svc:8080` without
+  knowing the release name in advance. A plain URL renders exactly as before.
+
+### Changed
+
+- **A 401 or 403 on the startup heartbeat is retried instead of exiting.** On a
+  fresh self-hosted install the server creates the cluster and the bootstrap
+  key from its environment moments after it starts, and the agent — started
+  alongside it — used to hit that window, exit, and sit in CrashLoopBackOff
+  with a backoff that outlived the condition. It now retries with a short
+  backoff (2 s doubling to 30 s) and an error-level log line naming the cause
+  on every attempt, and stays not-Ready until a heartbeat is accepted. A key
+  that is genuinely wrong therefore shows as a pod that never becomes Ready,
+  with the reason in `kubectl logs`, rather than as a restart count. The
+  behaviour for a 5xx or a network error at startup is unchanged.
+
 ### Fixed
 
 - **The documented upgrade command failed across versions.** Every

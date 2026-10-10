@@ -70,6 +70,11 @@ const SCAN_RETRY_COOLDOWN_MS = parseInt(process.env.SCAN_RETRY_COOLDOWN_MS ?? "3
 // deployed, and the agent waits for it rather than crash-looping the fleet.
 const STARTUP_HEARTBEAT_MAX_BACKOFF_MS = 60_000;
 const STARTUP_HEARTBEAT_ATTEMPTS = 6;
+/**
+ * How long a 401 / 403 at startup is retried before the backoff reaches its
+ * ceiling. Short on purpose: the case this exists for resolves in seconds.
+ */
+const STARTUP_AUTH_RETRY_MAX_BACKOFF_MS = 30_000;
 // Grace the chart gives us (terminationGracePeriodSeconds), minus a margin so
 // the process exits on its own terms rather than by SIGKILL.
 const SHUTDOWN_TIMEOUT_MS = parseInt(process.env.SHUTDOWN_TIMEOUT_MS ?? "25000", 10);
@@ -343,27 +348,49 @@ async function scanImage(info: ImageInfo, coreApi: k8s.CoreV1Api): Promise<ScanO
 // ─── Startup heartbeat ───────────────────────────────────────────────────────
 
 /**
- * The first heartbeat, with the one policy that matters for a fleet: only a
- * credential failure is fatal.
+ * The first heartbeat, with two policies that matter for a fleet.
  *
  * It used to be "any non-2xx is fatal", which meant a StackRadar deploy — a
  * minute of 502s from the ingress — put every customer cluster's scanner into
  * CrashLoopBackOff at once, and a backoff that grew to five minutes before the
- * control plane was even back. A 401 or 403 cannot be fixed by waiting, and
- * exiting is what makes it visible in `kubectl get pods`; a 5xx or a network
- * error is waited out with capped backoff, and if it is still failing after
- * the last attempt the agent starts anyway. The periodic heartbeat keeps
- * trying, `/healthz` reports the failures, and the scans that cannot upload
- * are requeued rather than lost.
+ * control plane was even back. A 5xx or a network error is waited out with
+ * capped backoff, and if it is still failing after the last attempt the agent
+ * starts anyway: the periodic heartbeat keeps trying, `/healthz` reports the
+ * failures, and the scans that cannot upload are requeued rather than lost.
+ *
+ * A 401 or 403 used to exit, on the theory that a wrong credential cannot be
+ * fixed by waiting. It can, in one case that is now the default install: the
+ * self-hosted chart starts this agent beside the server it reports to, and the
+ * server creates the cluster and the key from its environment at boot
+ * (`BOOTSTRAP_CLUSTER_ID` / `BOOTSTRAP_CLUSTER_API_KEY`) — so for the first
+ * seconds of a fresh install the key is "wrong" and then it is right. Exiting
+ * turned that into a crash loop whose backoff outlived the condition. So an
+ * auth failure is retried too, with its own short ceiling and an error-level
+ * line naming the cause on every attempt. The agent never "starts anyway"
+ * from this branch: nothing it did could upload. It stays not-Ready instead —
+ * the health server is up, the informer has not started — which is what
+ * `kubectl get pods` shows for a key that is genuinely wrong, with the reason
+ * one `kubectl logs` away.
  */
 async function startupHeartbeat(): Promise<void> {
+    let authFailures = 0;
     for (let attempt = 1; ; attempt++) {
         try {
             await heartbeat();
             return;
         } catch (err) {
-            if (err instanceof HeartbeatRejectedError && err.isAuthFailure) throw err;
             const msg = err instanceof Error ? err.message : String(err);
+            if (err instanceof HeartbeatRejectedError && err.isAuthFailure) {
+                authFailures++;
+                const backoffMs = Math.min(STARTUP_AUTH_RETRY_MAX_BACKOFF_MS, 2000 * 2 ** (authFailures - 1));
+                log.error(
+                    { err: msg, status: err.status, attempt: authFailures, backoffMs },
+                    "control plane rejected the credentials; retrying — on a fresh self-hosted install the server "
+                    + "creates the bootstrap key moments after it starts, otherwise check API key, API URL and cluster ID",
+                );
+                await new Promise((r) => setTimeout(r, backoffMs));
+                continue;
+            }
             if (attempt >= STARTUP_HEARTBEAT_ATTEMPTS) {
                 log.warn({ err: msg, attempts: attempt }, "control plane unreachable at startup; starting anyway and retrying on the heartbeat interval");
                 return;

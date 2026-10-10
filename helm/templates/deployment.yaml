@@ -167,8 +167,14 @@ spec:
             # so the UI can flag clusters running an outdated Helm chart.
             - name: STACKRADAR_SCANNER_VERSION
               value: {{ .Chart.Version | quote }}
+            {{- /*
+            `tpl`, so the `stackradar` chart can install this one as a
+            dependency and point it at the server Service of the same release
+            without knowing the release name in advance. A URL with no
+            template in it renders as itself.
+            */}}
             - name: STACKRADAR_API_URL
-              value: {{ required "stackradar.apiUrl is required" .Values.stackradar.apiUrl | quote }}
+              value: {{ tpl (required "stackradar.apiUrl is required" .Values.stackradar.apiUrl) . | quote }}
             - name: STACKRADAR_API_KEY
               valueFrom:
                 secretKeyRef:

@@ -1,5 +1,8 @@
 stackradar:
-  # -- StackRadar API endpoint. Override only when running against a self-hosted instance.
+  # -- StackRadar API endpoint. Override only when running against a self-hosted
+  # instance. Rendered through `tpl`, so a parent chart can point it at a Service
+  # of the same release (`http://{{ .Release.Name }}-server.{{ .Release.Namespace }}.svc:8080`,
+  # which is what the `stackradar` chart does); a plain URL renders unchanged.
   apiUrl: "https://api.stackradar.io"
 
   # -- Cluster ID to identify this cluster in StackRadar. Can be passed inline at install time

@@ -603,7 +603,7 @@ See [RELEASING.md](https://github.com/lockdep/stackradar-scanner/blob/main/RELEA
 | serviceAccount.create | bool | `true` | Create a ServiceAccount for the scanner. |
 | serviceAccount.name | string | `""` | Override the ServiceAccount name. Defaults to the release name when empty. |
 | stackradar.apiKey | string | `""` | API key for StackRadar. If set, the chart creates the credentials Secret automatically. |
-| stackradar.apiUrl | string | `"https://api.stackradar.io"` | StackRadar API endpoint. Override only when running against a self-hosted instance. |
+| stackradar.apiUrl | string | `"https://api.stackradar.io"` | StackRadar API endpoint. Override only when running against a self-hosted instance. Rendered through `tpl`, so a parent chart can point it at a Service of the same release (`http://{{ .Release.Name }}-server.{{ .Release.Namespace }}.svc:8080`, which is what the `stackradar` chart does); a plain URL renders unchanged. |
 | stackradar.clusterId | string | `""` | Cluster ID to identify this cluster in StackRadar. Can be passed inline at install time instead of via a Secret (avoid in day-to-day use — values land on disk and in CI logs). |
 | stackradar.existingSecret | string | `""` | Name of a pre-existing Secret with keys `cluster-id` and `api-key`. When set, the chart skips Secret creation and the Deployment reads from this Secret instead. Compatible with sealed-secrets, external-secrets, and SOPS workflows. |
 | stackradar.existingSecretKeyApiKey | string | `""` | Key within `existingSecret` holding the API key. Defaults to `api-key` when empty. |

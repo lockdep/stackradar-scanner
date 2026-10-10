@@ -128,7 +128,11 @@ export class HeartbeatRejectedError extends Error {
             : ""));
         this.name = "HeartbeatRejectedError";
     }
-    /** 401 / 403: wrong key, wrong cluster, revoked. Retrying cannot help. */
+    /**
+     * 401 / 403: wrong key, wrong cluster, revoked — or, on a fresh
+     * self-hosted install, a bootstrap key the server has not created yet
+     * (the startup path retries these with a short backoff for that reason).
+     */
     get isAuthFailure(): boolean {
         return this.status === 401 || this.status === 403;
     }

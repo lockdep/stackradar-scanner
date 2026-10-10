@@ -23,6 +23,14 @@
   },
 
   "properties": {
+    "global": {
+      "type": "object",
+      "$comment": "Builtin Helm value, injected into every subchart's values whether or not anything sets it. Listed so the chart validates when installed as a dependency of the `stackradar` chart (helm/helm#10392); the chart reads nothing from it."
+    },
+    "enabled": {
+      "type": "boolean",
+      "$comment": "Read by the parent chart's `condition: scanner.enabled`, never by this one; Helm passes it down with the rest of the subchart's values, so it has to be allowed here. Standalone installs have no reason to set it."
+    },
     "rbac": {
       "type": "object",
       "additionalProperties": false,
@@ -34,7 +42,7 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "apiUrl":                     { "type": "string", "format": "uri" },
+        "apiUrl":                     { "type": "string", "pattern": "^(https?://.+|\\{\\{.+)$" },
         "clusterId":                  { "type": "string" },
         "apiKey":                     { "type": "string" },
         "existingSecret":             { "type": "string" },

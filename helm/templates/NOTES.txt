@@ -7,7 +7,7 @@ with app.stackradar.io / dev.app.stackradar.io. An apiUrl that is not one of
 those (a port-forward, say) has no derivable UI, so fall back to production
 rather than print a link that goes nowhere.
 */ -}}
-{{- $apiUrl := trimSuffix "/" .Values.stackradar.apiUrl -}}
+{{- $apiUrl := trimSuffix "/" (tpl .Values.stackradar.apiUrl .) -}}
 {{- $appUrl := "https://app.stackradar.io" -}}
 {{- if contains "api." $apiUrl -}}
 {{- $appUrl = replace "api." "app." $apiUrl -}}
