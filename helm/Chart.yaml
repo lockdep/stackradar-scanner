@@ -46,10 +46,10 @@ icon: https://stackradar.io/apple-icon
 # built image digest. The values below are dev placeholders.
 annotations:
   artifacthub.io/category: security
-  # Source-available, not open source: use is permitted except to build or run
-  # something that competes with StackRadar. Full terms ship in the chart as
-  # LICENSE.md, as the license's Notices section requires.
-  artifacthub.io/license: PolyForm-Shield-1.0.0
+  # SPDX identifier. Apache-2.0 since 0.6.0 (PolyForm Shield 1.0.0 before
+  # that). The full text and the NOTICE file ship in the chart as LICENSE and
+  # NOTICE, which Apache-2.0 §4 requires of any redistribution.
+  artifacthub.io/license: Apache-2.0
   artifacthub.io/changes: |
     - kind: added
       description: Development build
@@ -59,7 +59,7 @@ annotations:
     - name: Support
       url: https://github.com/lockdep/stackradar-scanner/issues
     - name: License
-      url: https://github.com/lockdep/stackradar-scanner/blob/main/LICENSE.md
+      url: https://github.com/lockdep/stackradar-scanner/blob/main/LICENSE
   # No `whitelisted: true`: that key opts the image *out* of Artifact Hub's
   # vulnerability scanning, and an agent that scans other people's images
   # should not exempt its own.

@@ -144,16 +144,20 @@ block the retry — bump to the next patch version instead.
 
 ## License notices travel with every artifact
 
-The PolyForm Shield License requires that anyone who receives a copy of the
-software also receives the terms. Three copies exist and CI keeps them in sync:
+Apache-2.0 (§4) requires that anyone who receives a copy of the software also
+receives the licence and the `NOTICE` file. Three copies of each exist and CI
+keeps them in sync:
 
-- `LICENSE.md` at the repository root,
-- `helm/LICENSE.md`, packaged into every chart `.tgz` (CI fails the build if it
-  drifts from the root copy),
-- `/app/LICENSE.md` inside the runtime image, plus the
-  `org.opencontainers.image.licenses=PolyForm-Shield-1.0.0` label.
+- `LICENSE` and `NOTICE` at the repository root,
+- `helm/LICENSE` and `helm/NOTICE`, packaged into every chart `.tgz` (CI fails
+  the build if either drifts from the root copy),
+- `/app/LICENSE` and `/app/NOTICE` inside the runtime image, plus the
+  `org.opencontainers.image.licenses=Apache-2.0` label.
 
-If you edit the license, update the root copy and run `cp LICENSE.md helm/LICENSE.md`.
+If you edit either file, update the root copy and run
+`cp LICENSE NOTICE helm/`. The chart's `artifacthub.io/license` annotation in
+`helm/Chart.yaml` is the SPDX identifier Artifact Hub displays; it only changes
+if the licence itself does.
 
 ## Verifying a release
 

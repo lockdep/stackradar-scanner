@@ -3,6 +3,7 @@
   "//version": "Placeholder — stamped by CI from the release tag. See RELEASING.md.",
   "version": "0.0.0-dev",
   "private": true,
+  "license": "Apache-2.0",
   "type": "module",
   "packageManager": "pnpm@11.21.0",
   "scripts": {

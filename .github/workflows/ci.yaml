@@ -83,17 +83,19 @@ jobs:
             fi
           done
 
-      # The chart ships its own copy of the terms so they travel with the .tgz,
-      # which the license's Notices section requires. Two copies can drift.
-      - name: Assert chart license matches the repository license
+      # The chart ships its own copy of the licence and NOTICE so they travel
+      # with the .tgz, which Apache-2.0 §4 requires of a redistribution. Two
+      # copies can drift.
+      - name: Assert chart LICENSE and NOTICE match the repository copies
         run: |
           set -euo pipefail
-          if ! diff -q LICENSE.md helm/LICENSE.md >/dev/null; then
-            echo "::error file=helm/LICENSE.md::helm/LICENSE.md differs from LICENSE.md." \
-                 "Run: cp LICENSE.md helm/LICENSE.md"
-            diff LICENSE.md helm/LICENSE.md || true
-            exit 1
-          fi
+          for f in LICENSE NOTICE; do
+            if ! diff -q "$f" "helm/$f" >/dev/null; then
+              echo "::error file=helm/$f::helm/$f differs from $f. Run: cp $f helm/$f"
+              diff "$f" "helm/$f" || true
+              exit 1
+            fi
+          done
 
       # CHANGELOG.md is chart metadata: the release workflow publishes the
       # section matching the tag as the GitHub Release notes and as the chart's

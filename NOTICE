@@ -1,0 +1,16 @@
+StackRadar Scanner
+Copyright 2026 LockDep (https://stackradar.io)
+
+This product includes software developed by LockDep for StackRadar
+(https://stackradar.io), licensed under the Apache License, Version 2.0
+(see LICENSE).
+
+The licence covers the code, not the name. "StackRadar", "LockDep" and the
+StackRadar logo are trademarks of LockDep. You may run, modify and
+redistribute the software under its licence, but you may not use the
+StackRadar name or logo to identify a modified version, a fork or a hosted
+service in a way that suggests it is provided or endorsed by LockDep.
+Describe such a version as "based on StackRadar".
+
+This product bundles Syft (https://github.com/anchore/syft), Copyright
+Anchore, Inc., licensed under the Apache License, Version 2.0.

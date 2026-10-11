@@ -4,7 +4,7 @@
 
 [![Release](https://img.shields.io/github/v/release/lockdep/stackradar-scanner?style=flat-square&label=Release)](https://github.com/lockdep/stackradar-scanner/releases/latest)
 [![Artifact Hub](https://img.shields.io/endpoint?url=https://artifacthub.io/badge/repository/stackradar&style=flat-square)](https://artifacthub.io/packages/helm/stackradar/stackradar-scanner)
-[![License: PolyForm Shield 1.0.0](https://img.shields.io/badge/License-PolyForm%20Shield%201.0.0-informational?style=flat-square)](LICENSE.md)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-informational?style=flat-square)](LICENSE)
 [![Signed with cosign](https://img.shields.io/badge/Signed-cosign%20keyless-informational?style=flat-square)](#verifying-what-you-install)
 
 Event-driven Kubernetes agent that watches pod changes in real time, generates
@@ -14,7 +14,7 @@ an SBOM for every container image running in your cluster with
 visibility.
 
 This agent runs with cluster-wide read access, so the source is published for
-you to audit. It is **source-available, not open source** — see
+you to audit. It is open source under the **Apache License 2.0** — see
 [License](#license).
 
 ## How it works
@@ -408,7 +408,9 @@ running an outdated agent are visible in the StackRadar UI.
 
 ## License
 
-[PolyForm Shield License 1.0.0](LICENSE.md). You may read, run, modify and
-self-host this software. You may **not** use it to provide a product that
-competes with StackRadar. This is a source-available license, not an open source
-one.
+[Apache License 2.0](LICENSE). Use, modify and redistribute it freely,
+including commercially; keep the [NOTICE](NOTICE) with any copy you pass on.
+Releases up to and including 0.5.0 were published under PolyForm Shield 1.0.0,
+and those versions stay under that licence; everything from 0.6.0 is Apache-2.0.
+The licence covers the code, not the name — the NOTICE file has the trademark
+terms.

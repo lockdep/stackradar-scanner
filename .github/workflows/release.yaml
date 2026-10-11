@@ -238,7 +238,7 @@ jobs:
           labels: |
             org.opencontainers.image.title=stackradar-scanner
             org.opencontainers.image.version=${{ steps.version.outputs.version }}
-            org.opencontainers.image.licenses=PolyForm-Shield-1.0.0
+            org.opencontainers.image.licenses=Apache-2.0
 
       # The native-arch image is built and loaded first so it can be run
       # before anything is pushed. A published version is immutable, so a

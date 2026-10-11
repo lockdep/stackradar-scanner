@@ -89,9 +89,9 @@ COPY --from=prod-deps /app/node_modules ./node_modules
 # for Node to load the compiled ESM output, and SBOM scanners read the name and
 # version from it.
 COPY --from=builder /app/package.json ./package.json
-# The license's Notices section requires the terms to travel with any copy of
-# the software, and this image is a copy.
-COPY --from=builder /app/LICENSE.md ./LICENSE.md
+# Apache-2.0 §4 requires the licence and the NOTICE file to travel with any
+# redistribution of the software, and this image is one.
+COPY --from=builder /app/LICENSE /app/NOTICE ./
 
 # syft's default is to call Anchore on every run to ask whether a newer syft
 # exists. Off at the image level, so the agent's only egress is the StackRadar

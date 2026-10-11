@@ -18,6 +18,18 @@ Removed, Fixed, Security — so use those six and nothing else.
 
 ## [Unreleased]
 
+### Changed
+
+- **Relicensed to Apache-2.0.** The scanner and its Helm chart are now open
+  source under the Apache License 2.0; up to 0.5.0 they were published under
+  PolyForm Shield 1.0.0, which forbade using them in a competing product.
+  Nothing in the agent's behaviour changes. The repository, the chart `.tgz`
+  and the image all carry `LICENSE` and `NOTICE` (replacing `LICENSE.md`), the
+  chart's `artifacthub.io/license` annotation and the image's
+  `org.opencontainers.image.licenses` label read `Apache-2.0`, and the NOTICE
+  file states the trademark terms for the StackRadar name and logo. Versions
+  already released stay under the licence they shipped with.
+
 ## [0.5.0] - 2026-10-10
 
 ### Added
