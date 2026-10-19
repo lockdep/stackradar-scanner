@@ -15,7 +15,7 @@
     "test:watch": "vitest"
   },
   "dependencies": {
-    "@kubernetes/client-node": "^1.0.0",
+    "@kubernetes/client-node": "^2.0.0",
     "pino": "^10.4.0",
     "undici": "^8.10.2"
   },
