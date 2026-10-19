@@ -6,7 +6,7 @@
 # moving tag, so two builds of the same commit could otherwise ship different
 # base layers — and different CVEs in the SBOM customers scan. Renovate raises a
 # PR when the tag moves, which makes each base-layer change a reviewable commit.
-FROM node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32 AS base
+FROM node:26-alpine@sha256:6f08a523443ddedf52941874c203475b0ad503e859ad70cb26ab8be9a517dbd5 AS base
 ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0
 WORKDIR /app
 RUN corepack enable
@@ -69,7 +69,7 @@ RUN set -eux; \
     syft version
 
 # ── Runtime ──────────────────────────────────────────────────────────────────
-FROM node:22-alpine@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32 AS runner
+FROM node:26-alpine@sha256:6f08a523443ddedf52941874c203475b0ad503e859ad70cb26ab8be9a517dbd5 AS runner
 
 # syft is a static Go binary, but it uses the system trust store rather than a
 # bundled one, so it needs ca-certificates to reach registries over TLS.
