@@ -808,6 +808,16 @@ export interface InventoryContainer {
     repository: string | null;
     /** Pods **observed** running this container on this digest. */
     runningPods: number;
+    /**
+     * Names of `pod.spec.imagePullSecrets` on the pods running this
+     * container, unioned across replicas — **names only, never contents**.
+     * When a registry rejects the scan, the Coverage card uses them to
+     * pre-fill `scanner.imagePullSecretNames` instead of sending the
+     * operator to `kubectl`. `[]` means the pods carry none, which is a
+     * fact the card acts on too (the fix is then a credential of the
+     * scanner's own), so it is always sent.
+     */
+    imagePullSecrets: string[];
 }
 
 export interface InventoryWorkload {
@@ -1320,11 +1330,15 @@ export function buildInventory(
                     registry: parsed.registry ?? null,
                     repository: parsed.projectName || null,
                     runningPods: 0,
+                    imagePullSecrets: [],
                 };
                 containers.set(cKey, container);
                 entry.workload.containers.push(container);
             }
             container.runningPods += 1;
+            for (const name of info.imagePullSecrets) {
+                if (!container.imagePullSecrets.includes(name)) container.imagePullSecrets.push(name);
+            }
         }
     }
 

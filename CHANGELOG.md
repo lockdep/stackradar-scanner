@@ -18,6 +18,20 @@ Removed, Fixed, Security — so use those six and nothing else.
 
 ## [Unreleased]
 
+### Added
+
+- **When a private registry rejects a scan, StackRadar now tells you which
+  pull Secrets to let the agent read, by name.** The inventory report carries
+  the names of each container's `imagePullSecrets` (an additive, optional
+  field of the v3 payload — names only, never a Secret's contents), and the
+  Coverage card renders the `scanner.imagePullSecretNames` fix pre-filled
+  from them instead of sending you to `kubectl` to find out. Pods that carry
+  no pull Secret are reported as such, so the card can say the fix is a
+  credential of the agent's own rather than a list of names. No new RBAC:
+  the names come off the pod spec the agent already reads, and nothing is
+  read from a Secret unless `scanner.resolveImagePullSecrets` is on. Nothing
+  to configure; a server older than this field ignores it.
+
 ## [0.6.0] - 2026-10-11
 
 ### Changed

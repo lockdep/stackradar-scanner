@@ -158,6 +158,11 @@ image on upload, everything else in the inventory report described below:
 - The **CycloneDX SBOM** produced by syft — the package inventory of the image.
 - **Image identity**: registry host, image reference, image digest, tag.
 - **Placement**: namespace, and the workload kind (`Deployment`, `StatefulSet`, …).
+- **The names of the pod's `imagePullSecrets`** — names only, never a
+  Secret's contents. StackRadar's Coverage card uses them to tell you which
+  Secrets to let the agent read when a private registry rejects a scan. The
+  agent opens a pull Secret only with `scanner.resolveImagePullSecrets=true`,
+  and nothing it reads from one is ever sent.
 - **A workload name**, taken from the `app.kubernetes.io/name` or `app` pod
   label, falling back to the pod name with its generated suffix stripped.
 - **Allowlisted pod labels** — exactly these twelve keys, and no others:
