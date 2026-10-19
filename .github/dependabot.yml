@@ -1,0 +1,58 @@
+# Version updates for the dependency surfaces Dependabot can see. This mirrors
+# the intent of renovate.json5 so either tool can be the active one; never run
+# both at once or every bump arrives twice.
+#
+# Not covered here, because Dependabot has no equivalent of Renovate's regex
+# managers: the `# renovate:` pins for syft (Dockerfile ARG SYFT_VERSION) and
+# for helm / helm-docs (workflow `env:` values). Those still need a manual bump
+# or the Renovate app.
+version: 2
+
+updates:
+  # Weekly rather than continuous: batching keeps the release history readable,
+  # and nothing here is urgent enough to warrant a PR the hour it lands.
+  # Security updates ignore this schedule and open as soon as an advisory lands.
+
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "07:00"
+      timezone: Europe/Oslo
+    labels: [dependencies]
+    open-pull-requests-limit: 10
+    groups:
+      # Dev tooling never reaches the shipped image, so it is reviewed as one PR.
+      dev-dependencies:
+        dependency-type: development
+    # Runtime dependencies end up in the shipped image and its SBOM, so they
+    # are reviewed one at a time rather than as a batch (no group for them).
+
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "07:00"
+      timezone: Europe/Oslo
+    labels: [dependencies]
+    groups:
+      # The base image is pinned by digest and used by two stages (base and
+      # runner); grouping keeps them from drifting apart across separate PRs.
+      node-base-image:
+        patterns: [node]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "07:00"
+      timezone: Europe/Oslo
+    labels: [dependencies]
+    groups:
+      # Third-party actions are pinned by commit SHA with a `# vX.Y.Z` comment;
+      # Dependabot keeps both current. One PR per week for all of them.
+      github-actions:
+        patterns: ["*"]
