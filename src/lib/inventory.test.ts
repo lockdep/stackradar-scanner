@@ -22,6 +22,7 @@ interface PodOptions {
     ownerReferences?: { kind: string; name: string; controller?: boolean }[];
     containers?: { name: string; image: string; imageID?: string; running?: boolean }[];
     initContainers?: { name: string; image: string; imageID?: string }[];
+    imagePullSecrets?: string[];
 }
 
 function pod(options: PodOptions): k8s.V1Pod {
@@ -36,7 +37,7 @@ function pod(options: PodOptions): k8s.V1Pod {
             annotations: options.annotations,
             ownerReferences: options.ownerReferences as k8s.V1OwnerReference[] | undefined,
         },
-        spec: {},
+        spec: { imagePullSecrets: options.imagePullSecrets?.map((name) => ({ name })) },
         status: {
             phase: options.phase ?? "Running",
             startTime: options.startTime,
@@ -210,6 +211,22 @@ describe("buildInventory", () => {
         expect(workloads[0]!.containers.map((c) => c.imageDigest).sort()).toEqual([DIGEST_A, DIGEST_B].sort());
         expect(workloads[0]!.containers.every((c) => c.name === "main")).toBe(true);
         expect(workloads[0]!.containers.map((c) => c.runningPods)).toEqual([1, 1]);
+    });
+
+    /**
+     * Names only, unioned across the replicas: the Coverage card pre-fills
+     * `scanner.imagePullSecretNames` from them when a registry rejects the
+     * scan, and an empty list is itself the answer "the pods carry none".
+     */
+    it("reports the names of the pods' pull Secrets, unioned, and an empty list when there are none", () => {
+        const report = buildInventory([
+            deploymentPod("api-7d9f8b6c4d-abcde", "api", "7d9f8b6c4d", { imagePullSecrets: ["regcred"] }),
+            deploymentPod("api-7d9f8b6c4d-fghij", "api", "7d9f8b6c4d", { imagePullSecrets: ["regcred", "ghcr"] }),
+            deploymentPod("web-5c4d3b2a1f-abcde", "web", "5c4d3b2a1f"),
+        ]);
+        const byName = new Map(report.namespaces[0]!.workloads.map((w) => [w.name, w.containers[0]!]));
+        expect(byName.get("api")!.imagePullSecrets).toEqual(["regcred", "ghcr"]);
+        expect(byName.get("web")!.imagePullSecrets).toEqual([]);
     });
 
     it("counts each container of a multi-container pod separately", () => {
