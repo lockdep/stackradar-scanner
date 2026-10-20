@@ -18,6 +18,8 @@ Removed, Fixed, Security — so use those six and nothing else.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-20
+
 ### Added
 
 - **When a private registry rejects a scan, StackRadar now tells you which
@@ -178,7 +180,8 @@ Removed, Fixed, Security — so use those six and nothing else.
   `oci://ghcr.io/lockdep/charts/stackradar-scanner`; the image and chart are
   cosigned and the image is pinned by digest.
 
-[Unreleased]: https://github.com/lockdep/stackradar-scanner/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/lockdep/stackradar-scanner/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/lockdep/stackradar-scanner/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/lockdep/stackradar-scanner/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/lockdep/stackradar-scanner/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/lockdep/stackradar-scanner/compare/v0.3.0...v0.4.0
