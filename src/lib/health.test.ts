@@ -10,6 +10,7 @@ import {
     recordInformerEvent,
     recordHeartbeatOk,
     recordHeartbeatFailure,
+    recordControlPlaneContact,
     checkLiveness,
     checkReadiness,
     healthSnapshot,
@@ -145,6 +146,16 @@ describe("liveness", () => {
         expect(checkLiveness().ok).toBe(true);
         expect(healthSnapshot().consecutiveHeartbeatFailures).toBe(0);
         expect(healthSnapshot().lastHeartbeatOkAt).toBe(Date.now());
+    });
+
+    it("forgets heartbeat failures after any other answered request, without claiming a heartbeat", () => {
+        for (let i = 0; i < MAX_CONSECUTIVE_HEARTBEAT_FAILURES; i++) recordHeartbeatFailure();
+        expect(checkLiveness().ok).toBe(false);
+
+        recordControlPlaneContact();
+        expect(checkLiveness().ok).toBe(true);
+        expect(healthSnapshot().consecutiveHeartbeatFailures).toBe(0);
+        expect(healthSnapshot().lastHeartbeatOkAt).toBeNull();
     });
 });
 

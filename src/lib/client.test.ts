@@ -16,7 +16,7 @@ import {
     uploadSBOM,
     UploadRejectedError,
 } from "./client.js";
-import { resetHealthState } from "./health.js";
+import { MAX_CONSECUTIVE_HEARTBEAT_FAILURES, healthSnapshot, recordHeartbeatFailure, resetHealthState } from "./health.js";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
@@ -142,6 +142,27 @@ describe("heartbeat", () => {
         await expect(heartbeat()).rejects.toSatisfy(
             (e: unknown) => e instanceof HeartbeatRejectedError && !e.isAuthFailure,
         );
+    });
+
+    it("counts a failure toward liveness by default", async () => {
+        stubFetch([{ status: 502 }]);
+        await expect(heartbeat()).rejects.toBeInstanceOf(HeartbeatRejectedError);
+        expect(healthSnapshot().consecutiveHeartbeatFailures).toBe(1);
+    });
+
+    it("leaves liveness alone when the startup loop asks it to", async () => {
+        stubFetch([{ status: 502 }]);
+        await expect(heartbeat({ countFailures: false })).rejects.toBeInstanceOf(HeartbeatRejectedError);
+        vi.stubGlobal("fetch", async () => { throw new TypeError("fetch failed"); });
+        await expect(heartbeat({ countFailures: false })).rejects.toThrow("fetch failed");
+        expect(healthSnapshot().consecutiveHeartbeatFailures).toBe(0);
+    });
+
+    it("is cleared by any other answered request, not only the next heartbeat", async () => {
+        for (let i = 0; i < MAX_CONSECUTIVE_HEARTBEAT_FAILURES; i++) recordHeartbeatFailure();
+        stubFetch([{ status: 200, body: { exists: false } }]);
+        await checkExistingSbom("sha256:a");
+        expect(healthSnapshot().consecutiveHeartbeatFailures).toBe(0);
     });
 });
 

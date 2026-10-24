@@ -30,6 +30,16 @@ export const INFORMER_DOWN_GRACE_MS = INFORMER_RESTART_DELAY_MS * 3;
  * the wrong moment. What it does catch is the failure that is local to the
  * pod — a dead proxy dispatcher, a DNS answer cached against a moved
  * endpoint — where a fresh process genuinely does recover.
+ *
+ * Two things follow from "sized for the heartbeat interval". The startup
+ * heartbeat's own retry burst (six attempts in about two minutes) must not
+ * feed this counter, or an agent scheduled a minute before its server has
+ * finished pulling starts life at the threshold and is restarted by the
+ * kubelet before the next periodic heartbeat gets a chance to clear it —
+ * see `recordControlPlaneContact` and the startup path in `watch.ts`. And a
+ * counter that only a heartbeat can reset is wrong when the agent has just
+ * uploaded an SBOM: any answered request proves the path this liveness
+ * check exists to test.
  */
 export const MAX_CONSECUTIVE_HEARTBEAT_FAILURES = 5;
 
@@ -131,6 +141,17 @@ export function heartbeatNoticeSnapshot(): Readonly<typeof heartbeatNotice> {
 
 export function recordHeartbeatFailure(): void {
     state.consecutiveHeartbeatFailures++;
+}
+
+/**
+ * Any successful request to the control plane — an SBOM check, an upload, an
+ * inventory report — clears the heartbeat failure count. The count exists to
+ * catch a pod that cannot reach the control plane at all; a 2xx on any route
+ * is proof it can. `lastHeartbeatOkAt` is left alone: that one means what it
+ * says.
+ */
+export function recordControlPlaneContact(): void {
+    state.consecutiveHeartbeatFailures = 0;
 }
 
 /** A copy, for tests and for the probe response body. */

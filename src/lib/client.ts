@@ -1,7 +1,7 @@
 import * as fs from "fs";
 import { API_URL, API_KEY, SCANNER_VERSION, CLUSTER_ID, type InventoryReport } from "./scan.js";
 import { log } from "./logger.js";
-import { recordHeartbeatOk, recordHeartbeatFailure, recordHeartbeatNotice } from "./health.js";
+import { recordHeartbeatOk, recordHeartbeatFailure, recordHeartbeatNotice, recordControlPlaneContact } from "./health.js";
 import { clusterVersion } from "./cluster-version.js";
 
 // ─── HTTP with retry ─────────────────────────────────────────────────────────
@@ -79,6 +79,9 @@ async function fetchWithRetry(
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
         try {
             const response = await fetch(url, finalInit);
+            // A 2xx on any route is contact with the control plane, whatever
+            // the heartbeat last said — see `recordControlPlaneContact`.
+            if (response.ok) recordControlPlaneContact();
             /* 429 / 503 are the control plane asking a whole fleet to back off
                at once. Honouring `Retry-After` here is what keeps a thousand
                agents from turning one overloaded minute into a thundering herd;
@@ -186,8 +189,16 @@ export function isOlderVersion(a: string, b: string): boolean {
  * Both failure paths are counted, not just the rejection: a proxy dispatcher
  * pointed at an endpoint that has moved never gets a response at all, and that
  * is precisely the fault a restart clears.
+ *
+ * `countFailures: false` is for the startup loop, which retries on its own
+ * short schedule: the liveness limit is sized for one failure per heartbeat
+ * *interval*, and six attempts in two minutes would exhaust it before the
+ * server beside this agent has pulled its image. The loop records one failure
+ * itself if it gives up.
  */
-export async function heartbeat(): Promise<HeartbeatResponse> {
+export async function heartbeat(
+    { countFailures = true }: { countFailures?: boolean } = {},
+): Promise<HeartbeatResponse> {
     const url = `${API_URL}/v1/heartbeat`;
     const headers: Record<string, string> = { "X-API-Key": API_KEY! };
     if (CLUSTER_ID) headers["X-Cluster-Id"] = CLUSTER_ID;
@@ -201,12 +212,12 @@ export async function heartbeat(): Promise<HeartbeatResponse> {
     try {
         response = await fetchWithRetry(url, { method: "POST", headers });
     } catch (err) {
-        recordHeartbeatFailure();
+        if (countFailures) recordHeartbeatFailure();
         throw err;
     }
 
     if (!response.ok) {
-        recordHeartbeatFailure();
+        if (countFailures) recordHeartbeatFailure();
         throw new HeartbeatRejectedError(response.status);
     }
 

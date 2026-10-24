@@ -18,6 +18,15 @@ Removed, Fixed, Security — so use those six and nothing else.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The agent no longer restarts once on a cold install.** When it was
+  scheduled before the server beside it had pulled its image, its startup
+  retries exhausted the liveness limit (sized for one failure per five-minute
+  heartbeat), and the kubelet restarted a pod that had already started
+  uploading SBOMs. Startup attempts no longer count toward liveness, and any
+  successful request to the control plane clears the count.
+
 ## [0.7.0] - 2026-10-20
 
 ### Added

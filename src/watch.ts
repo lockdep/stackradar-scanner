@@ -46,6 +46,7 @@ import {
     markInformerUp,
     markInformerDown,
     recordInformerEvent,
+    recordHeartbeatFailure,
 } from "./lib/health.js";
 import { log } from "./lib/logger.js";
 import { classifyScanFailure, type ScanFailure } from "./lib/scan-failure.js";
@@ -355,8 +356,15 @@ async function scanImage(info: ImageInfo, coreApi: k8s.CoreV1Api): Promise<ScanO
  * CrashLoopBackOff at once, and a backoff that grew to five minutes before the
  * control plane was even back. A 5xx or a network error is waited out with
  * capped backoff, and if it is still failing after the last attempt the agent
- * starts anyway: the periodic heartbeat keeps trying, `/healthz` reports the
- * failures, and the scans that cannot upload are requeued rather than lost.
+ * starts anyway: the periodic heartbeat keeps trying, `/healthz` reports one
+ * failure, and the scans that cannot upload are requeued rather than lost.
+ *
+ * One failure, not six: the attempts here do not count toward liveness
+ * (`countFailures: false`). The liveness limit is one failure per heartbeat
+ * interval, and this loop's whole budget is two minutes — on a fresh
+ * self-hosted install that is less than the server beside us takes to pull
+ * its image, and counting them restarted the agent once on every cold
+ * install, three minutes after it had started uploading SBOMs just fine.
  *
  * A 401 or 403 used to exit, on the theory that a wrong credential cannot be
  * fixed by waiting. It can, in one case that is now the default install: the
@@ -376,7 +384,7 @@ async function startupHeartbeat(): Promise<void> {
     let authFailures = 0;
     for (let attempt = 1; ; attempt++) {
         try {
-            await heartbeat();
+            await heartbeat({ countFailures: false });
             return;
         } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
@@ -392,6 +400,7 @@ async function startupHeartbeat(): Promise<void> {
                 continue;
             }
             if (attempt >= STARTUP_HEARTBEAT_ATTEMPTS) {
+                recordHeartbeatFailure();
                 log.warn({ err: msg, attempts: attempt }, "control plane unreachable at startup; starting anyway and retrying on the heartbeat interval");
                 return;
             }
