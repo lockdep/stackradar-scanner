@@ -18,6 +18,8 @@ Removed, Fixed, Security — so use those six and nothing else.
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-10-24
+
 ### Fixed
 
 - **The agent no longer restarts once on a cold install.** When it was
@@ -189,7 +191,8 @@ Removed, Fixed, Security — so use those six and nothing else.
   `oci://ghcr.io/lockdep/charts/stackradar-scanner`; the image and chart are
   cosigned and the image is pinned by digest.
 
-[Unreleased]: https://github.com/lockdep/stackradar-scanner/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/lockdep/stackradar-scanner/compare/v0.7.1...HEAD
+[0.7.1]: https://github.com/lockdep/stackradar-scanner/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/lockdep/stackradar-scanner/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/lockdep/stackradar-scanner/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/lockdep/stackradar-scanner/compare/v0.4.0...v0.5.0
